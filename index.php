@@ -112,6 +112,7 @@ foreach ($klaster_info_raw as $k => $info) {
             display: flex;
             align-items: center;
             justify-content: space-between;
+            gap: 1rem;
             padding: .75rem 2rem;
         }
 
@@ -149,6 +150,35 @@ foreach ($klaster_info_raw as $k => $info) {
         }
 
         .nav-tabs {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: .25rem;
+            flex-wrap: wrap;
+        }
+
+        .nav-toggle {
+            display: none;
+            align-items: center;
+            gap: .45rem;
+            padding: .55rem .85rem;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: rgba(26, 34, 53, .95);
+            color: var(--text);
+            font: inherit;
+            font-size: .82rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: background .2s, border-color .2s, color .2s;
+        }
+
+        .nav-toggle:hover {
+            background: var(--surface2);
+            border-color: #2b3d5c
+        }
+
+        .nav-menu {
             display: flex;
             gap: .25rem
         }
@@ -981,16 +1011,52 @@ foreach ($klaster_info_raw as $k => $info) {
             }
         }
 
-        @media(max-width:640px) {
+        @media(max-width:860px) {
             nav {
-                padding: .6rem 1rem;
-                flex-direction: column;
-                gap: .5rem
+                padding: .65rem 1rem;
+                flex-wrap: wrap;
+                align-items: flex-start
+            }
+
+            .nav-brand {
+                min-width: 0
+            }
+
+            .nav-toggle {
+                display: inline-flex;
+                margin-left: auto
+            }
+
+            .nav-menu {
+                width: 100%;
+                display: grid;
+                grid-template-columns: 1fr;
+                gap: .45rem;
+                max-height: 0;
+                overflow: hidden;
+                opacity: 0;
+                transform: translateY(-.35rem);
+                transition: max-height .25s ease, opacity .2s ease, transform .2s ease;
+                margin-top: 0
+            }
+
+            .nav-menu.open {
+                max-height: 70vh;
+                opacity: 1;
+                transform: translateY(0);
+                margin-top: .75rem
             }
 
             .nav-tabs {
-                flex-wrap: wrap;
-                justify-content: center
+                width: 100%;
+                flex-direction: column;
+                align-items: stretch;
+                justify-content: flex-start
+            }
+
+            .nav-tab {
+                width: 100%;
+                text-align: left
             }
 
             .page {
@@ -1015,15 +1081,18 @@ foreach ($klaster_info_raw as $k => $info) {
                 <div class="nav-sub">Wisata Kabupaten Magelang</div>
             </div>
         </div>
-        <div class="nav-tabs">
-            <button class="nav-tab active" onclick="showPage('dashboard')">Dashboard</button>
-            <button class="nav-tab" onclick="showPage('peta')">🗺 Peta SIG</button>
-            <button class="nav-tab" onclick="showPage('data')">Tabel Data</button>
-            <button class="nav-tab" onclick="showPage('analisis')">Analisis</button>
-            <button class="nav-tab" onclick="showPage('proyeksi')">Proyeksi</button>
-            <button class="nav-tab" onclick="showPage('algoritma')">Algoritma</button>
-            <button class="nav-tab" onclick="showPage('manual')" style="background:rgba(99,102,241,.15);color:var(--accent);border:1px solid rgba(99,102,241,.3)">🧮 Perhitungan Manual</button>
-            <a href="admin.php" class="nav-tab" style="background:rgba(239,68,68,.15);color:#ff6b6b;border:1px solid rgba(239,68,68,.3);text-decoration:none">⚙ Admin</a>
+        <button class="nav-toggle" type="button" onclick="toggleNavMenu()" aria-expanded="false" aria-controls="navMenu">☰ Menu</button>
+        <div class="nav-menu" id="navMenu">
+            <div class="nav-tabs">
+                <button class="nav-tab active" data-page="dashboard" onclick="showPage('dashboard', this)">Dashboard</button>
+                <button class="nav-tab" data-page="peta" onclick="showPage('peta', this)">🗺 Peta SIG</button>
+                <button class="nav-tab" data-page="data" onclick="showPage('data', this)">Tabel Data</button>
+                <button class="nav-tab" data-page="analisis" onclick="showPage('analisis', this)">Analisis</button>
+                <button class="nav-tab" data-page="proyeksi" onclick="showPage('proyeksi', this)">Proyeksi</button>
+                <button class="nav-tab" data-page="algoritma" onclick="showPage('algoritma', this)">Algoritma</button>
+                <button class="nav-tab" data-page="manual" onclick="showPage('manual', this)" style="background:rgba(99,102,241,.15);color:var(--accent);border:1px solid rgba(99,102,241,.3)">Perhitungan</button>
+                <a href="admin.php" class="nav-tab" style="background:rgba(239,68,68,.15);color:#ff6b6b;border:1px solid rgba(239,68,68,.3);text-decoration:none">Admin</a>
+            </div>
         </div>
     </nav>
 
@@ -2629,15 +2698,40 @@ foreach ($klaster_info_raw as $k => $info) {
 
         <!-- ══════════ SCRIPTS ══════════ -->
         <script>
+            const navMenu = document.getElementById('navMenu');
+            const navToggle = document.querySelector('.nav-toggle');
+            const mobileNavQuery = window.matchMedia('(max-width: 860px)');
+
+            function syncNavMode() {
+                navMenu.classList.remove('open');
+                navToggle.setAttribute('aria-expanded', 'false');
+                navToggle.textContent = '☰ Menu';
+            }
+
+            function toggleNavMenu() {
+                if (!mobileNavQuery.matches) return;
+                const isOpen = navMenu.classList.toggle('open');
+                navToggle.setAttribute('aria-expanded', String(isOpen));
+                navToggle.textContent = isOpen ? '✕ Tutup' : '☰ Menu';
+            }
+
             // ─── PAGE SWITCHING ───────────────────────────────
-            function showPage(name) {
+            function showPage(name, trigger) {
                 document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
                 document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
                 document.getElementById('page-' + name).classList.add('active');
-                event.target.classList.add('active');
+                const activeTab = document.querySelector(`.nav-tab[data-page="${name}"]`);
+                if (activeTab) activeTab.classList.add('active');
+                if (trigger) trigger.classList.add('active');
+                if (mobileNavQuery.matches) {
+                    syncNavMode();
+                }
                 if (name === 'peta' && !window._mapInit) initMap();
                 setTimeout(animateFadeIns, 50);
             }
+
+            mobileNavQuery.addEventListener('change', syncNavMode);
+            syncNavMode();
 
             // ─── FADE IN ANIMATION ───────────────────────────
             function animateFadeIns() {
