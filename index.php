@@ -50,6 +50,65 @@ foreach ($klaster_info_raw as $k => $info) {
         'strategi' => $info['strategi'],
     ];
 }
+
+// ══════════════════════════════════════════════════════════════
+// CALCULATE ALL VISUALIZATION VALUES FROM DATABASE
+// ══════════════════════════════════════════════════════════════
+
+// Hero stats
+$total_destinasi = count($destinations);
+$total_klaster = count($klaster_info);
+$iterasi_konvergen = $evaluasi['iter'];
+$silhouette_score = $evaluasi['sc'];
+$total_pendapatan = array_sum(array_column($destinations, 'pendapatan'));
+$total_kunjungan = array_sum(array_column($destinations, 'kunjungan'));
+
+// Visit distribution per cluster
+$visit_per_cluster = [0, 0, 0];
+foreach ($destinations as $d) {
+    $k = $d['klaster'] - 1;
+    if (isset($visit_per_cluster[$k])) {
+        $visit_per_cluster[$k] += $d['kunjungan'];
+    }
+}
+
+// Revenue distribution per cluster (in millions)
+$revenue_per_cluster = [0, 0, 0];
+foreach ($destinations as $d) {
+    $k = $d['klaster'] - 1;
+    if (isset($revenue_per_cluster[$k])) {
+        $revenue_per_cluster[$k] += $d['pendapatan'];
+    }
+}
+
+// Calculate average attributes per cluster for Radar chart
+$radar_data = [];
+for ($k = 1; $k <= 3; $k++) {
+    $cluster_dests = array_filter($destinations, fn($d) => $d['klaster'] == $k);
+    if (empty($cluster_dests)) {
+        $radar_data[$k] = [0, 0, 0, 0, 0, 0];
+    } else {
+        $n = count($cluster_dests);
+        $avg_rating = array_sum(array_column($cluster_dests, 'rating')) / $n;
+        $avg_aksesibilitas = array_sum(array_column($cluster_dests, 'aksesibilitas')) / $n;
+        $avg_fasilitas = array_sum(array_column($cluster_dests, 'fasilitas')) / $n;
+        $avg_potensi_alam = array_sum(array_column($cluster_dests, 'potensi_alam')) / $n;
+        $avg_potensi_budaya = array_sum(array_column($cluster_dests, 'potensi_budaya')) / $n;
+        $avg_trend = array_sum(array_column($cluster_dests, 'trend')) / $n;
+        $radar_data[$k] = [
+            round($avg_rating, 2),
+            round($avg_aksesibilitas, 2),
+            round($avg_fasilitas, 2),
+            round($avg_potensi_alam, 2),
+            round($avg_potensi_budaya, 2),
+            round($avg_trend * 100, 1)  // Convert to percentage for visibility
+        ];
+    }
+}
+
+// WCSS per iteration (Iteration 0: init, Iteration 1: calculated, Final: from database)
+$wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
+
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -1067,6 +1126,46 @@ foreach ($klaster_info_raw as $k => $info) {
                 padding: 2rem 1rem 1.5rem
             }
         }
+
+        /* ── UPDATE BUTTON ── */
+        #btnUpdateCalc {
+            display: inline-flex;
+            align-items: center;
+            gap: .5rem;
+            padding: .6rem 1.3rem;
+            background: #10b981;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: .85rem;
+            cursor: pointer;
+            transition: all .3s ease;
+            box-shadow: 0 4px 12px rgba(16, 185, 129, .2);
+        }
+
+        #btnUpdateCalc:hover:not(:disabled) {
+            background: #059669;
+            box-shadow: 0 6px 20px rgba(16, 185, 129, .3);
+            transform: translateY(-2px);
+        }
+
+        #btnUpdateCalc:active:not(:disabled) {
+            transform: translateY(0);
+        }
+
+        #btnUpdateCalc:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+
+        @media(max-width:640px) {
+            #btnUpdateCalc {
+                width: 100%;
+                justify-content: center;
+                padding: .7rem 1rem;
+            }
+        }
     </style>
 </head>
 
@@ -1102,23 +1201,23 @@ foreach ($klaster_info_raw as $k => $info) {
         <p>Klasterisasi berbasis data spatio-temporal untuk pemodelan dinamis potensi destinasi wisata Kabupaten Magelang menggunakan algoritma K-Means++ dengan 3 klaster optimal.</p>
         <div class="hero-stats">
             <div class="hstat">
-                <div class="hstat-val" style="color:var(--k1)">15</div>
+                <div class="hstat-val" style="color:var(--k1)"><?= $total_destinasi ?></div>
                 <div class="hstat-lbl">Destinasi</div>
             </div>
             <div class="hstat">
-                <div class="hstat-val" style="color:var(--k2)">3</div>
+                <div class="hstat-val" style="color:var(--k2)"><?= $total_klaster ?></div>
                 <div class="hstat-lbl">Klaster</div>
             </div>
             <div class="hstat">
-                <div class="hstat-val" style="color:var(--k3)">2</div>
+                <div class="hstat-val" style="color:var(--k3)"><?= $iterasi_konvergen ?></div>
                 <div class="hstat-lbl">Iterasi</div>
             </div>
             <div class="hstat">
-                <div class="hstat-val" style="color:var(--accent)">0.629</div>
+                <div class="hstat-val" style="color:var(--accent)"><?= number_format($silhouette_score, 4) ?></div>
                 <div class="hstat-lbl">Silhouette</div>
             </div>
             <div class="hstat">
-                <div class="hstat-val" style="color:#ec4899">2.1M</div>
+                <div class="hstat-val" style="color:#ec4899"><?= number_format($total_pendapatan / 1000000, 1) ?>M</div>
                 <div class="hstat-lbl">Total/Thn</div>
             </div>
         </div>
@@ -1564,8 +1663,13 @@ foreach ($klaster_info_raw as $k => $info) {
         <!-- ══════════════ PAGE: PERHITUNGAN MANUAL ══════════════ -->
         <div id="page-manual" class="page">
 
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:1.5rem;margin-bottom:2rem;flex-wrap:wrap">
+                <div class="section-title" style="margin:0;flex:1;min-width:300px">🧮 Buku Perhitungan Manual K-Means++</div>
+                <button id="btnUpdateCalc" onclick="updateCalculation()" style="padding:0.7rem 1.5rem;background:#10b981;color:white;border:none;border-radius:8px;font-weight:700;font-size:0.9rem;cursor:pointer;white-space:nowrap;box-shadow:0 4px 12px rgba(16,185,129,0.3);transition:all 0.3s ease;flex-shrink:0">📤 Update ke Database</button>
+            </div>
+
             <div style="background:linear-gradient(90deg,rgba(99,102,241,.12),transparent);border:1px solid rgba(99,102,241,.25);border-radius:14px;padding:1.25rem 1.5rem;margin-bottom:1.75rem">
-                <div style="font-weight:800;font-size:1.05rem;margin-bottom:.35rem">🧮 Buku Perhitungan Manual K-Means++</div>
+                <div style="font-weight:700;font-size:.95rem;margin-bottom:.35rem">Detail Perhitungan</div>
                 <div style="font-size:.82rem;color:var(--muted);line-height:1.7">Seluruh perhitungan dilakukan langkah demi langkah menggunakan data asli dari file Excel. Setiap angka dapat ditelusuri dan diverifikasi secara manual. Klik bagian judul untuk expand/collapse.</div>
             </div>
 
@@ -2396,18 +2500,18 @@ foreach ($klaster_info_raw as $k => $info) {
                     <div class="formula-box">
                         <div class="formula-title">a(5) = rata-rata jarak ke sesama anggota K2 (7 titik lain)</div>
                         <span class="formula-main">
-                            d(5,6)=? d(5,7)=? … (dihitung dari data ternormalisasi)<br>
-                            a(5) ≈ 0.1123 (rata-rata jarak intra-klaster)
+                            d(5,6), d(5,7), … (dihitung dari data ternormalisasi)<br>
+                            a(5) ≈ 0.8277 (rata-rata jarak intra-klaster)
                         </span>
                         <br><br>
                         <div class="formula-title">b(5) = rata-rata jarak ke klaster terdekat = K3 (6 titik)</div>
                         <span class="formula-main">
                             d(5,2), d(5,3), d(5,4), d(5,9), d(5,11), d(5,12) → rata-rata<br>
-                            b(5) ≈ 0.4012 (rata-rata jarak ke K3)
+                            b(5) ≈ 0.8457 (rata-rata jarak ke K3)
                         </span>
                         <br><br>
-                        <div class="formula-title">s(5) = (0.4012 − 0.1123) / max(0.4012, 0.1123) = 0.2889 / 0.4012</div>
-                        <span class="formula-main">s(5) = <span style="color:var(--k3)">0.7201</span> → Sangat Baik</span>
+                        <div class="formula-title">s(5) = (0.8457 − 0.8277) / max(0.8457, 0.8277) = 0.0180 / 0.8457</div>
+                        <span class="formula-main">s(5) = <span style="color:var(--muted)">0.0212</span> → Salah Klaster</span>
                     </div>
 
                     <div class="table-wrap">
@@ -2426,21 +2530,21 @@ foreach ($klaster_info_raw as $k => $info) {
                             <tbody>
                                 <?php
                                 $scData = [
-                                    [1, 'Borobudur', 1, 0.0821, 0.4213, 0.8051, 'Sangat Baik'],
-                                    [2, 'Punthuk Setumbu', 3, 0.1034, 0.3856, 0.7318, 'Sangat Baik'],
-                                    [3, 'Candi Pawon', 3, 0.0967, 0.3124, 0.6905, 'Baik'],
-                                    [4, 'Candi Mendut', 3, 0.0845, 0.2987, 0.7171, 'Sangat Baik'],
-                                    [5, 'Ketep Pass', 2, 0.1123, 0.4012, 0.7201, 'Sangat Baik'],
-                                    [6, 'Kopeng', 2, 0.1456, 0.3234, 0.5498, 'Baik'],
-                                    [7, 'Kedung Kayang', 2, 0.1678, 0.3567, 0.5296, 'Baik'],
-                                    [8, 'Telaga Bleder', 2, 0.1534, 0.3289, 0.5336, 'Baik'],
-                                    [9, 'Bukit Rhema', 3, 0.0934, 0.3978, 0.7652, 'Sangat Baik'],
-                                    [10, 'Sawah Sukm.', 2, 0.1723, 0.3412, 0.4950, 'Lemah'],
-                                    [11, 'Museum Karma', 3, 0.0889, 0.3056, 0.7091, 'Sangat Baik'],
-                                    [12, 'Taman Langgeng', 3, 0.1012, 0.2834, 0.6429, 'Baik'],
-                                    [13, 'Gunung Andong', 2, 0.1612, 0.3345, 0.5181, 'Baik'],
-                                    [14, 'Umbul Songo', 2, 0.1589, 0.3267, 0.5136, 'Baik'],
-                                    [15, 'Puthuk Mongkrong', 2, 0.1645, 0.3423, 0.5194, 'Baik'],
+                                    [1, 'Borobudur', 1, 0.0000, 1.5801, 1.0000, 'Sangat Baik'],
+                                    [2, 'Punthuk Setumbu', 3, 0.7752, 1.0050, 0.2287, 'Salah Klaster'],
+                                    [3, 'Candi Pawon', 3, 0.3628, 1.4036, 0.7415, 'Sangat Baik'],
+                                    [4, 'Candi Mendut', 3, 0.3448, 1.4477, 0.7618, 'Sangat Baik'],
+                                    [5, 'Ketep Pass', 2, 0.8277, 0.8457, 0.0212, 'Salah Klaster'],
+                                    [6, 'Kopeng', 2, 0.9311, 1.5146, 0.3852, 'Lemah'],
+                                    [7, 'Kedung Kayang', 2, 0.4481, 1.3010, 0.6556, 'Baik'],
+                                    [8, 'Telaga Bleder', 2, 0.5159, 1.3453, 0.6165, 'Baik'],
+                                    [9, 'Bukit Rhema', 3, 0.7758, 1.0417, 0.2553, 'Lemah'],
+                                    [10, 'Sawah Sukm.', 2, 0.5492, 1.1545, 0.5243, 'Baik'],
+                                    [11, 'Museum Karma', 3, 0.7252, 1.7333, 0.5816, 'Baik'],
+                                    [12, 'Taman Langgeng', 3, 0.8488, 1.2720, 0.3327, 'Lemah'],
+                                    [13, 'Gunung Andong', 2, 0.6890, 1.7483, 0.6059, 'Baik'],
+                                    [14, 'Umbul Songo', 2, 0.7020, 1.7417, 0.5970, 'Baik'],
+                                    [15, 'Puthuk Mongkrong', 2, 0.9858, 1.2319, 0.1998, 'Salah Klaster'],
                                 ];
                                 foreach ($scData as $r): ?>
                                     <tr>
@@ -2455,7 +2559,7 @@ foreach ($klaster_info_raw as $k => $info) {
                                 <?php endforeach; ?>
                                 <tr style="border-top:2px solid var(--k3);background:rgba(16,185,129,.07)">
                                     <td colspan="5" style="font-weight:700;color:var(--k3)">SC Keseluruhan = rata-rata s(i)</td>
-                                    <td class="mono highlight3" style="font-weight:700">0.6294</td>
+                                    <td class="mono highlight3" style="font-weight:700">0.5005</td>
                                     <td style="font-size:.72rem;color:var(--k3)">✓ Baik (> 0.5)</td>
                                 </tr>
                             </tbody>
@@ -2485,11 +2589,11 @@ foreach ($klaster_info_raw as $k => $info) {
                     <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Langkah 1 — Hitung σᵢ (dispersi rata-rata intra-klaster):</p>
                     <div class="formula-box">
                         <span class="formula-main">
-                            σ₁ = d(Borobudur, C1) / 1 = 0.0000 / 1 = 0.0000 → pakai σ₁ ≈ 0.1028 (from sheet)<br>
+                            σ₁ = d(Borobudur, C1) / 1 = 0.0000 / 1 = <span style="color:var(--k1)">0.0000</span><br>
                             σ₂ = Σ d(xᵢ,C2) / 8 = (0.8277+0.9311+0.4481+0.5159+0.5492+0.6890+0.7020+0.9858)/8<br>
-                            = 5.6488 / 8 = <span style="color:var(--k2)">0.0928</span><br>
+                            = 5.6488 / 8 = <span style="color:var(--k2)">0.7061</span><br>
                             σ₃ = Σ d(xᵢ,C3) / 6 = (0.7752+0.3628+0.3448+0.7758+0.7252+0.8488)/6<br>
-                            = 3.8326 / 6 = <span style="color:var(--k3)">0.1634</span>
+                            = 3.8326 / 6 = <span style="color:var(--k3)">0.6388</span>
                         </span>
                     </div>
 
@@ -2519,40 +2623,40 @@ foreach ($klaster_info_raw as $k => $info) {
                             <tbody>
                                 <tr>
                                     <td class="highlight">K1</td>
-                                    <td class="mono">0.1028</td>
+                                    <td class="mono">0.0000</td>
                                     <td>vs K2</td>
-                                    <td class="mono">0.0928</td>
-                                    <td class="mono">2.2515</td>
-                                    <td class="mono">0.0869</td>
-                                    <td class="mono highlight">0.0869</td>
+                                    <td class="mono">0.7061</td>
+                                    <td class="mono">2.2517</td>
+                                    <td class="mono">0.3136</td>
+                                    <td class="mono highlight">0.4043</td>
                                 </tr>
                                 <tr>
                                     <td class="highlight2">K2</td>
-                                    <td class="mono">0.0928</td>
+                                    <td class="mono">0.7061</td>
                                     <td>vs K3</td>
-                                    <td class="mono">0.1634</td>
+                                    <td class="mono">0.6388</td>
                                     <td class="mono">1.1828</td>
-                                    <td class="mono">0.2166</td>
-                                    <td class="mono highlight2">0.2166</td>
+                                    <td class="mono">1.1370</td>
+                                    <td class="mono highlight2">1.1370</td>
                                 </tr>
                                 <tr>
                                     <td class="highlight3">K3</td>
-                                    <td class="mono">0.1634</td>
+                                    <td class="mono">0.6388</td>
                                     <td>vs K1</td>
-                                    <td class="mono">0.1028</td>
+                                    <td class="mono">0.0000</td>
                                     <td class="mono">1.5801</td>
-                                    <td class="mono">0.1685</td>
-                                    <td class="mono highlight3">0.1685</td>
+                                    <td class="mono">0.4043</td>
+                                    <td class="mono highlight3">1.1370</td>
                                 </tr>
                             </tbody>
                         </table>
                     </div>
 
                     <div class="formula-box">
-                        <div class="formula-title">DBI = (1/K) × (R1 + R2 + R3) = (1/3) × (0.0869 + 0.2166 + 0.1685)</div>
-                        <span class="formula-main">DBI = (1/3) × 0.4720 = <span style="color:var(--k3)">0.1573</span></span>
+                        <div class="formula-title">DBI = (1/K) × (R1 + R2 + R3) = (1/3) × (0.4043 + 1.1370 + 1.1370)</div>
+                        <span class="formula-main">DBI = (1/3) × 2.6783 = <span style="color:var(--k3)">0.8928</span></span>
                     </div>
-                    <div class="calc-result">✓ <strong>DBI = 0.1573</strong> — Sangat baik (&lt; 1.0). Artinya klaster sangat kompak secara internal dan terpisah jauh antar klaster.</div>
+                    <div class="calc-result">✓ <strong>DBI = 0.8928</strong> — Baik (&lt; 1.0). Artinya klaster cukup kompak secara internal dan terpisah antar klaster.</div>
                 </div>
             </div>
 
@@ -2692,8 +2796,8 @@ foreach ($klaster_info_raw as $k => $info) {
         <footer>
             <strong>SIG K-Means++ Wisata Kabupaten Magelang</strong> &nbsp;|&nbsp;
             Pengembangan Model Konseptual Intelijen Spasial Berbasis Klasterisasi K-Means++ &amp; Analisis Spatio-Temporal &nbsp;|&nbsp;
-            Data: 15 Destinasi · 10 Atribut · 3 Klaster Optimal &nbsp;|&nbsp;
-            SC=0.629 · DBI=0.157 · Konvergen Iterasi 2
+            Data: <?= $total_destinasi ?> Destinasi · 10 Atribut · <?= $total_klaster ?> Klaster Optimal &nbsp;|&nbsp;
+            SC=<?= number_format($evaluasi['sc'], 4) ?> · DBI=<?= number_format($evaluasi['dbi'], 4) ?> · Konvergen Iterasi <?= $evaluasi['iter'] ?>
         </footer>
 
         <!-- ══════════ SCRIPTS ══════════ -->
@@ -2755,9 +2859,126 @@ foreach ($klaster_info_raw as $k => $info) {
                 });
             }
 
-            // ─── DATA ─────────────────────────────────────────
-            const destinations = <?= json_encode($destinations) ?>;
-            const proyeksi = <?= json_encode($proyeksi) ?>;
+            // ─── BUTTON HOVER EFFECTS ─────────────────────────
+            const btnUpdate = document.getElementById('btnUpdateCalc');
+            if (btnUpdate) {
+                btnUpdate.addEventListener('mouseenter', function() {
+                    if (!this.disabled) {
+                        this.style.background = '#059669';
+                        this.style.transform = 'translateY(-2px)';
+                        this.style.boxShadow = '0 8px 20px rgba(16,185,129,0.4)';
+                    }
+                });
+                btnUpdate.addEventListener('mouseleave', function() {
+                    if (!this.disabled) {
+                        this.style.background = '#10b981';
+                        this.style.transform = 'translateY(0)';
+                        this.style.boxShadow = '0 4px 12px rgba(16,185,129,0.3)';
+                    }
+                });
+            }
+
+            // ─── UPDATE CALCULATION TO DATABASE ───────────────
+            function updateCalculation() {
+                const btn = document.getElementById('btnUpdateCalc');
+                const originalText = btn.textContent;
+                const originalBg = '#10b981';
+
+                try {
+                    // Get values from DOM (displayed values on page)
+                    const metricCards = document.querySelectorAll('#page-analisis .metric-card');
+                    let sc, dbi, chi, wcss, iter;
+
+                    // Iterate through metric cards and extract values
+                    metricCards.forEach(card => {
+                        const name = card.querySelector('.metric-name')?.textContent || '';
+                        const val = card.querySelector('.metric-val')?.textContent?.trim() || '';
+
+                        if (name.includes('Silhouette')) {
+                            sc = parseFloat(val.replace(',', '.'));
+                        } else if (name.includes('Davies-Bouldin')) {
+                            dbi = parseFloat(val.replace(',', '.'));
+                        } else if (name.includes('Calinski')) {
+                            chi = parseFloat(val.replace(',', '.'));
+                        } else if (name.includes('WCSS')) {
+                            wcss = parseFloat(val.replace(',', '.'));
+                            // Get ITER from metric-status "✓ Konvergen Iterasi N"
+                            const statusText = card.querySelector('.metric-status')?.textContent || '';
+                            const iterMatch = statusText.match(/Iterasi\s+(\d+)/);
+                            iter = iterMatch ? parseInt(iterMatch[1]) : 2;
+                        }
+                    });
+
+                    // Validate values
+                    if (isNaN(sc) || isNaN(dbi) || isNaN(chi) || isNaN(wcss) || iter === undefined) {
+                        throw new Error('Gagal mengambil nilai metrik: SC=' + sc + ', DBI=' + dbi + ', CHI=' + chi + ', WCSS=' + wcss + ', ITER=' + iter);
+                    }
+
+                    console.log('Values from DOM:', {
+                        sc,
+                        dbi,
+                        chi,
+                        wcss,
+                        iter
+                    });
+
+                    // Show loading state
+                    btn.disabled = true;
+                    btn.textContent = '⏳ Menyimpan...';
+                    btn.style.background = '#64748b';
+                    btn.style.opacity = '0.7';
+
+                    // Send to server
+                    const payload = {
+                        action: 'update_evaluasi',
+                        sc: sc,
+                        dbi: dbi,
+                        chi: chi,
+                        wcss: wcss,
+                        iter: iter
+                    };
+                    console.log('Sending payload:', payload);
+
+                    fetch('save_calculation.php', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify(payload)
+                        })
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.success) {
+                                btn.textContent = '✓ Data Tersimpan!';
+                                btn.style.background = '#059669';
+                                btn.style.opacity = '1';
+                                setTimeout(() => {
+                                    btn.disabled = false;
+                                    btn.textContent = originalText;
+                                    btn.style.background = originalBg;
+                                }, 2000);
+                            } else {
+                                throw new Error(data.message || 'Update gagal');
+                            }
+                        })
+                        .catch(error => {
+                            console.error('Error:', error);
+                            btn.textContent = '✗ Gagal';
+                            btn.style.background = '#ef4444';
+                            btn.style.opacity = '1';
+                            setTimeout(() => {
+                                btn.disabled = false;
+                                btn.textContent = originalText;
+                                btn.style.background = originalBg;
+                            }, 2500);
+                        });
+                } catch (error) {
+                    console.error('Error:', error);
+                    btn.textContent = '✗ Error';
+                    btn.style.background = '#ef4444';
+                }
+            }
+
             const COLORS = {
                 1: '#f59e0b',
                 2: '#3b82f6',
@@ -2774,8 +2995,12 @@ foreach ($klaster_info_raw as $k => $info) {
             Chart.defaults.borderColor = '#1e2d45';
             Chart.defaults.font.family = "'Sora', sans-serif";
 
+            // ─── DESTINATIONS DATA ────────────────────────────
+            const destinations = <?= json_encode($destinations) ?>;
+            const proyeksi = <?= json_encode($proyeksi) ?>;
+
             // ─── CHART: Visit distribution per cluster ────────
-            const visitPerCluster = [1250000, destinations.filter(d => d.klaster == 2).reduce((s, d) => s + d.kunjungan, 0), destinations.filter(d => d.klaster == 3).reduce((s, d) => s + d.kunjungan, 0)];
+            const visitPerCluster = <?= json_encode($visit_per_cluster) ?>;
             new Chart(document.getElementById('chartVisit'), {
                 type: 'doughnut',
                 data: {
@@ -2803,7 +3028,7 @@ foreach ($klaster_info_raw as $k => $info) {
             });
 
             // ─── CHART: Pendapatan ────────────────────────────
-            const pendPerCluster = [18500, 5735, 9450];
+            const pendPerCluster = <?= json_encode($revenue_per_cluster) ?>;
             new Chart(document.getElementById('chartPend'), {
                 type: 'bar',
                 data: {
@@ -2835,13 +3060,14 @@ foreach ($klaster_info_raw as $k => $info) {
             });
 
             // ─── CHART: Radar ─────────────────────────────────
+            const radarData = <?= json_encode($radar_data) ?>;
             new Chart(document.getElementById('chartRadar'), {
                 type: 'radar',
                 data: {
                     labels: ['Rating', 'Aksesibilitas', 'Fasilitas', 'P.Alam', 'P.Budaya'],
                     datasets: [{
                             label: 'K1 Tinggi',
-                            data: [4.9, 5, 5, 4, 5],
+                            data: radarData[1] || [0, 0, 0, 0, 0],
                             backgroundColor: 'rgba(245,158,11,.15)',
                             borderColor: '#f59e0b',
                             pointBackgroundColor: '#f59e0b',
@@ -2849,7 +3075,7 @@ foreach ($klaster_info_raw as $k => $info) {
                         },
                         {
                             label: 'K2 Sedang',
-                            data: [4.21, 2.25, 2.38, 4.63, 2.13],
+                            data: radarData[2] || [0, 0, 0, 0, 0],
                             backgroundColor: 'rgba(59,130,246,.15)',
                             borderColor: '#3b82f6',
                             pointBackgroundColor: '#3b82f6',
@@ -2857,7 +3083,7 @@ foreach ($klaster_info_raw as $k => $info) {
                         },
                         {
                             label: 'K3 Rendah',
-                            data: [4.25, 3.67, 3.50, 3.50, 4.33],
+                            data: radarData[3] || [0, 0, 0, 0, 0],
                             backgroundColor: 'rgba(16,185,129,.15)',
                             borderColor: '#10b981',
                             pointBackgroundColor: '#10b981',
@@ -2940,66 +3166,66 @@ foreach ($klaster_info_raw as $k => $info) {
             const siData = [{
                     n: 'Borobudur',
                     k: 1,
-                    s: 0.8051
+                    s: 1.0000
                 }, {
                     n: 'Pnthk Setumbu',
                     k: 3,
-                    s: 0.7318
+                    s: 0.2287
                 }, {
                     n: 'Candi Pawon',
                     k: 3,
-                    s: 0.6905
+                    s: 0.7415
                 }, {
                     n: 'Candi Mendut',
                     k: 3,
-                    s: 0.7171
+                    s: 0.7618
                 },
                 {
                     n: 'Ketep Pass',
                     k: 2,
-                    s: 0.7201
+                    s: 0.0212
                 }, {
                     n: 'Kopeng',
                     k: 2,
-                    s: 0.5498
+                    s: 0.3852
                 }, {
                     n: 'Kedung Kayang',
                     k: 2,
-                    s: 0.5296
+                    s: 0.6556
                 }, {
                     n: 'Telaga Bleder',
                     k: 2,
-                    s: 0.5336
+                    s: 0.6165
                 },
                 {
                     n: 'Bukit Rhema',
                     k: 3,
-                    s: 0.7652
+                    s: 0.2553
                 }, {
                     n: 'Saw.Sukomakmur',
                     k: 2,
-                    s: 0.4950
+                    s: 0.5243
                 }, {
                     n: 'Museum Karma',
                     k: 3,
-                    s: 0.7091
+                    s: 0.5816
                 }, {
                     n: 'Taman Langgeng',
                     k: 3,
-                    s: 0.6429
+                    s: 0.3327
                 },
                 {
                     n: 'Gn.Andong',
                     k: 2,
-                    s: 0.5181
+                    s: 0.6059
                 }, {
                     n: 'Umbul Songo',
                     k: 2,
-                    s: 0.5136
+                    s: 0.5970
                 }, {
                     n: 'Pthk Mongkrong',
                     k: 2,
-                    s: 0.5194
+                    s: 0.1998
                 }
             ];
             new Chart(document.getElementById('chartSilhouette'), {
@@ -3042,13 +3268,14 @@ foreach ($klaster_info_raw as $k => $info) {
             });
 
             // ─── CHART: WCSS convergence ──────────────────────
+            const wcssPerIter = <?= json_encode($wcss_per_iter) ?>;
             new Chart(document.getElementById('chartWCSS'), {
                 type: 'line',
                 data: {
                     labels: ['Iterasi 0 (init)', 'Iterasi 1', 'Iterasi 2 (konvergen)'],
                     datasets: [{
                         label: 'WCSS',
-                        data: [null, 14.057, 6.960],
+                        data: wcssPerIter,
                         borderColor: '#6366f1',
                         backgroundColor: 'rgba(99,102,241,.1)',
                         pointBackgroundColor: '#6366f1',
@@ -3083,10 +3310,10 @@ foreach ($klaster_info_raw as $k => $info) {
             new Chart(document.getElementById('chartRadar2'), {
                 type: 'radar',
                 data: {
-                    labels: ['Rating', 'Akses', 'Fasilitas', 'P.Alam', 'P.Budaya', 'Trend YoY'],
+                    labels: ['Rating', 'Akses', 'Fasilitas', 'P.Alam', 'P.Budaya', 'Trend YoY (%)'],
                     datasets: [{
                             label: 'K1 Tinggi',
-                            data: [4.9, 5, 5, 4, 5, 12.3],
+                            data: radarData[1] || [0, 0, 0, 0, 0, 0],
                             backgroundColor: 'rgba(245,158,11,.15)',
                             borderColor: '#f59e0b',
                             pointBackgroundColor: '#f59e0b',
@@ -3094,7 +3321,7 @@ foreach ($klaster_info_raw as $k => $info) {
                         },
                         {
                             label: 'K2 Sedang',
-                            data: [4.21, 2.25, 2.38, 4.63, 2.13, 21.99],
+                            data: radarData[2] || [0, 0, 0, 0, 0, 0],
                             backgroundColor: 'rgba(59,130,246,.15)',
                             borderColor: '#3b82f6',
                             pointBackgroundColor: '#3b82f6',
@@ -3102,7 +3329,7 @@ foreach ($klaster_info_raw as $k => $info) {
                         },
                         {
                             label: 'K3 Rendah',
-                            data: [4.25, 3.67, 3.50, 3.50, 4.33, 13.62],
+                            data: radarData[3] || [0, 0, 0, 0, 0, 0],
                             backgroundColor: 'rgba(16,185,129,.15)',
                             borderColor: '#10b981',
                             pointBackgroundColor: '#10b981',

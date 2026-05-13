@@ -72,7 +72,7 @@ function getClusterInfo($conn)
 // Function to fetch evaluasi metrics
 function getEvaluasi($conn)
 {
-    $sql = "SELECT * FROM evaluasi LIMIT 1";
+    $sql = "SELECT * FROM evaluasi ORDER BY id DESC LIMIT 1";
     $result = $conn->query($sql);
 
     if ($result && $result->num_rows > 0) {
