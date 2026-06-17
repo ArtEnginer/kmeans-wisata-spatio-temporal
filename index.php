@@ -1,4 +1,3 @@
-Replaced: True
 <?php
 // ============================================================
 // K-MEANS++ INTELIJEN SPASIAL – WISATA KABUPATEN MAGELANG
