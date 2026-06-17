@@ -225,11 +225,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
                 Username: <code>admin</code><br>
                 Password: <code>admin123</code>
             </div>
-            <div class="credentials" style="margin-top: 0.5rem;">
-                <strong>Manager:</strong><br>
-                Username: <code>manager</code><br>
-                Password: <code>manager123</code>
-            </div>
+
         </div>
     </div>
 </body>
