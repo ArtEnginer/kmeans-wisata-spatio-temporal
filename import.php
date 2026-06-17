@@ -11,12 +11,12 @@ if (!isset($_SESSION['admin_logged_in']) || $_SESSION['user_role'] !== 'admin') 
 // Handle file upload
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['csv_file'])) {
     $file = $_FILES['csv_file'];
-    $allowed = ['csv', 'txt'];
+    $allowed = ['csv', 'txt', 'xlsx'];
     $filename = $file['name'];
     $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
 
     if (!in_array($ext, $allowed)) {
-        $_SESSION['error'] = 'Format file tidak didukung. Gunakan CSV atau TXT.';
+        $_SESSION['error'] = 'Format file tidak didukung. Gunakan Excel (.xlsx), CSV, atau TXT.';
     } elseif ($file['error'] !== UPLOAD_ERR_OK) {
         $_SESSION['error'] = 'Error saat upload: ' . $file['error'];
     } else {
@@ -28,8 +28,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['csv_file'])) {
         $tempFile = $uploadDir . uniqid() . '_' . $filename;
 
         if (move_uploaded_file($file['tmp_name'], $tempFile)) {
-            // Import data
-            $result = importDestinationsFromCSV($conn, $tempFile);
+            // Import data (CSV / XLSX)
+            $result = importDestinationsFromFile($conn, $tempFile, $ext);
 
             if ($result['success']) {
                 $_SESSION['success'] = $result['message'];
@@ -38,7 +38,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['csv_file'])) {
             }
 
             // Delete temp file
-            unlink($tempFile);
+            if (file_exists($tempFile)) {
+                unlink($tempFile);
+            }
         } else {
             $_SESSION['error'] = 'Gagal menyimpan file upload';
         }
@@ -48,10 +50,20 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_FILES['csv_file'])) {
     exit;
 }
 
-// Handle export
-if (isset($_GET['action']) && $_GET['action'] == 'export') {
-    exportDestinationsToCSV($conn);
-    exit;
+// Handle action downloads
+if (isset($_GET['action'])) {
+    if ($_GET['action'] == 'export') {
+        exportDestinationsToCSV($conn);
+        exit;
+    }
+    if ($_GET['action'] == 'export_xlsx') {
+        exportDestinationsToXlsx($conn);
+        exit;
+    }
+    if ($_GET['action'] == 'download_template') {
+        downloadTemplateXlsx();
+        exit;
+    }
 }
 
 ?>
@@ -314,7 +326,9 @@ if (isset($_GET['action']) && $_GET['action'] == 'export') {
         <h1>📥 Import Dataset Destinasi</h1>
         <div class="header-nav">
             <a href="admin.php" class="btn btn-secondary">← Kembali ke Admin</a>
-            <a href="import.php?action=export" class="btn btn-success">⬇ Export CSV</a>
+            <a href="import.php?action=download_template" class="btn btn-primary" style="background-color: var(--k1); color: var(--bg);">📋 Download Template Excel</a>
+            <a href="import.php?action=export_xlsx" class="btn btn-success">⬇ Export Excel (.xlsx)</a>
+            <a href="import.php?action=export" class="btn btn-secondary">⬇ Export CSV</a>
         </div>
     </div>
 
@@ -330,15 +344,15 @@ if (isset($_GET['action']) && $_GET['action'] == 'export') {
         <?php endif; ?>
 
         <div class="card">
-            <h2>📤 Upload File CSV</h2>
-            <p>Pilih file CSV untuk mengimpor data destinasi wisata ke database. File harus memiliki format yang sesuai dengan template di bawah.</p>
+            <h2>📤 Upload File Excel / CSV</h2>
+            <p>Pilih file Excel (.xlsx) atau CSV untuk mengimpor data destinasi wisata ke database. File harus memiliki format yang sesuai dengan template di bawah.</p>
 
             <form method="POST" enctype="multipart/form-data">
                 <div class="upload-area" id="uploadArea">
                     <div class="upload-icon">📄</div>
                     <p style="font-size: 1rem; margin-bottom: 0.5rem;"><strong>Klik untuk memilih atau drag file di sini</strong></p>
-                    <p style="font-size: 0.85rem; color: var(--muted);">Format: CSV atau TXT</p>
-                    <input type="file" id="csvFile" name="csv_file" accept=".csv,.txt" required>
+                    <p style="font-size: 0.85rem; color: var(--muted);">Format: Excel (.xlsx), CSV, atau TXT</p>
+                    <input type="file" id="csvFile" name="csv_file" accept=".xlsx,.csv,.txt" required>
                 </div>
 
                 <div class="file-info" id="fileInfo">
@@ -354,14 +368,14 @@ if (isset($_GET['action']) && $_GET['action'] == 'export') {
         </div>
 
         <div class="card template-section">
-            <h2>📋 Format File CSV</h2>
+            <h2>📋 Format File Excel & CSV</h2>
 
             <div class="info-box">
-                <strong>⚠️ Penting:</strong> File CSV harus memiliki 15 kolom dengan urutan yang benar. Header baris pertama tidak akan diimport. Pastikan format data sesuai dengan tipe field (angka, teks, dll).
+                <strong>⚠️ Penting:</strong> File Excel (.xlsx) atau CSV harus memiliki 12 kolom dengan urutan yang benar. Header baris pertama tidak akan diimport. Pastikan format data sesuai dengan tipe field (angka, teks, dll). Klaster, Skor, dan Rekomendasi tidak perlu masuk data import karena akan dihitung otomatis oleh sistem.
             </div>
 
             <p><strong>Contoh Header CSV:</strong></p>
-            <pre style="background: var(--surface2); padding: 1rem; border-radius: 8px; overflow-x: auto; color: var(--accent); font-size: 0.85rem;">Nama,Longitude,Latitude,Kunjungan,Rating,Aksesibilitas,Fasilitas,Potensi Alam,Potensi Budaya,Pendapatan,Trend,Zona,Klaster,Skor,Rekomendasi</pre>
+            <pre style="background: var(--surface2); padding: 1rem; border-radius: 8px; overflow-x: auto; color: var(--accent); font-size: 0.85rem;">Nama,Longitude,Latitude,Kunjungan,Rating,Aksesibilitas,Fasilitas,Potensi Alam,Potensi Budaya,Pendapatan,Trend,Zona</pre>
 
             <table class="template-table">
                 <thead>
@@ -445,33 +459,15 @@ if (isset($_GET['action']) && $_GET['action'] == 'export') {
                         <td>Peak Season | Mid Season | Low Season</td>
                         <td>Peak Season</td>
                     </tr>
-                    <tr>
-                        <td>Klaster</td>
-                        <td>Number (1-3)</td>
-                        <td>Klaster K-Means hasil analisis</td>
-                        <td>1</td>
-                    </tr>
-                    <tr>
-                        <td>Skor</td>
-                        <td>Decimal (0-1)</td>
-                        <td>Skor komposit hasil K-Means</td>
-                        <td>0.9438</td>
-                    </tr>
-                    <tr>
-                        <td>Rekomendasi</td>
-                        <td>Text</td>
-                        <td>Strategi pengembangan wisata</td>
-                        <td>Prioritas pengembangan infrastruktur & promosi</td>
-                    </tr>
                 </tbody>
             </table>
         </div>
 
         <div class="card">
             <h2>📝 Contoh Baris Data CSV</h2>
-            <pre style="background: var(--surface2); padding: 1rem; border-radius: 8px; overflow-x: auto; color: var(--muted); font-size: 0.8rem; line-height: 1.6;">Candi Borobudur,110.2037,-7.6079,1250000,4.9,5,5,4,5,18500,0.123,Peak Season,1,0.9438,Prioritas pengembangan infrastruktur & promosi
-Punthuk Setumbu,110.1952,-7.6025,185000,4.7,3,3,5,4,2800,0.185,Peak Season,3,0.726,Eksplorasi & pengembangan awal
-Ketep Pass,110.2564,-7.5847,210000,4.5,3,4,5,3,3100,0.157,Peak Season,2,0.7082,Tingkatkan fasilitas & aksesibilitas</pre>
+            <pre style="background: var(--surface2); padding: 1rem; border-radius: 8px; overflow-x: auto; color: var(--muted); font-size: 0.8rem; line-height: 1.6;">Candi Borobudur,110.2037,-7.6079,1250000,4.9,5,5,4,5,18500,0.123,Peak Season
+Punthuk Setumbu,110.1952,-7.6025,185000,4.7,3,3,5,4,2800,0.185,Peak Season
+Ketep Pass,110.2564,-7.5847,210000,4.5,3,4,5,3,3100,0.157,Peak Season</pre>
         </div>
     </div>
 

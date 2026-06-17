@@ -1,11 +1,15 @@
-﻿<?php
-// Database configuration - try without specifying database first
-$servername = "localhost";
-$username = "root";
-$password = "";
+<?php
+// Database configuration
+require_once __DIR__ . '/env.php';
+loadEnv(__DIR__ . '/.env');
+
+$servername = env('DB_HOST', 'localhost');
+$username = env('DB_USER', 'root');
+$password = env('DB_PASS', '');
+$port = env('DB_PORT', '3306');
 
 // Create connection (without database)
-$conn = new mysqli($servername, $username, $password);
+$conn = new mysqli($servername, $username, $password, null, intval($port));
 
 // Check connection
 if ($conn->connect_error) {

@@ -35,12 +35,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action'])) {
         $pendapatan = floatval($_POST['pendapatan']);
         $trend = floatval($_POST['trend']);
         $zona = $conn->real_escape_string($_POST['zona']);
-        $klaster = intval($_POST['klaster']);
-        $skor = floatval($_POST['skor']);
-        $rekomendasi = $conn->real_escape_string($_POST['rekomendasi']);
 
         $sql = "INSERT INTO destinations (nama, lon, lat, kunjungan, rating, aksesibilitas, fasilitas, potensi_alam, potensi_budaya, pendapatan, trend, zona, klaster, skor, rekomendasi) 
-                VALUES ('$nama', $lon, $lat, $kunjungan, $rating, $aksesibilitas, $fasilitas, $potensi_alam, $potensi_budaya, $pendapatan, $trend, '$zona', $klaster, $skor, '$rekomendasi')";
+                VALUES ('$nama', $lon, $lat, $kunjungan, $rating, $aksesibilitas, $fasilitas, $potensi_alam, $potensi_budaya, $pendapatan, $trend, '$zona', 0, 0.0000, 'Belum dianalisis')";
 
         if ($conn->query($sql) === TRUE) {
             $_SESSION['success'] = 'Destinasi berhasil ditambahkan!';
@@ -61,15 +58,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action'])) {
         $pendapatan = floatval($_POST['pendapatan']);
         $trend = floatval($_POST['trend']);
         $zona = $conn->real_escape_string($_POST['zona']);
-        $klaster = intval($_POST['klaster']);
-        $skor = floatval($_POST['skor']);
-        $rekomendasi = $conn->real_escape_string($_POST['rekomendasi']);
 
         $sql = "UPDATE destinations SET 
                 nama='$nama', lon=$lon, lat=$lat, kunjungan=$kunjungan, rating=$rating, 
                 aksesibilitas=$aksesibilitas, fasilitas=$fasilitas, potensi_alam=$potensi_alam, 
                 potensi_budaya=$potensi_budaya, pendapatan=$pendapatan, trend=$trend, 
-                zona='$zona', klaster=$klaster, skor=$skor, rekomendasi='$rekomendasi' 
+                zona='$zona' 
                 WHERE id=$id";
 
         if ($conn->query($sql) === TRUE) {
@@ -715,23 +709,6 @@ $current_tab = $_GET['tab'] ?? 'destinations';
                             <option value="Low Season">Low Season</option>
                         </select>
                     </div>
-                    <div class="form-group">
-                        <label>Klaster *</label>
-                        <select id="destKlaster" name="klaster" required>
-                            <option value="">-- Pilih Klaster --</option>
-                            <option value="1">Klaster 1: Tinggi</option>
-                            <option value="2">Klaster 2: Sedang</option>
-                            <option value="3">Klaster 3: Rendah</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Skor *</label>
-                        <input type="number" id="destSkor" name="skor" min="0" max="1" step="0.0001" required>
-                    </div>
-                    <div class="form-group full">
-                        <label>Rekomendasi *</label>
-                        <textarea id="destRekomendasi" name="rekomendasi" required></textarea>
-                    </div>
                 </div>
 
                 <div class="modal-footer">
@@ -866,9 +843,6 @@ $current_tab = $_GET['tab'] ?? 'destinations';
             document.getElementById('destPendapatan').value = data.pendapatan;
             document.getElementById('destTrend').value = data.trend;
             document.getElementById('destZona').value = data.zona;
-            document.getElementById('destKlaster').value = data.klaster;
-            document.getElementById('destSkor').value = data.skor;
-            document.getElementById('destRekomendasi').value = data.rekomendasi;
 
             document.getElementById('destinationModal').classList.add('show');
         }

@@ -1,10 +1,6 @@
--- ============================================================
--- DATABASE SETUP: MUQOROBIN WISATA KABUPATEN MAGELANG
--- ============================================================
-
 -- Buat database jika belum ada
-CREATE DATABASE IF NOT EXISTS muqorobin_wisata;
-USE muqorobin_wisata;
+-- CREATE DATABASE IF NOT EXISTS muqorobin_wisata;
+-- USE muqorobin_wisata;
 
 -- Tabel Destinasi
 CREATE TABLE IF NOT EXISTS destinations (
@@ -138,6 +134,6 @@ INSERT INTO proyeksi (destination_id, nama, k, y2024, y2025, y2026, y2027, cagr,
 -- Insert default users (password hashed dengan MD5 - TODO: gunakan bcrypt di production)
 -- Password: admin123 (MD5 hash)
 INSERT INTO users (username, password, nama_lengkap, email, role, is_active) VALUES
-('admin', MD5('admin123'), 'Administrator MUQOROBIN', 'admin@muqorobin.local', 'admin', TRUE),
+('admin', MD5('admin123'), 'Administrator', 'admin@muqorobin.local', 'admin', TRUE),
 ('manager', MD5('manager123'), 'Manager Wisata', 'manager@muqorobin.local', 'manager', TRUE),
 ('viewer', MD5('viewer123'), 'Viewer Data', 'viewer@muqorobin.local', 'viewer', TRUE);

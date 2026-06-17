@@ -1,3 +1,4 @@
+Replaced: True
 <?php
 // ============================================================
 // K-MEANS++ INTELIJEN SPASIAL – WISATA KABUPATEN MAGELANG
@@ -25,11 +26,34 @@ foreach ($destinations as &$dest) {
 }
 unset($dest);
 
+// ══════════════════════════════════════════════════════════════
+// RECALCULATE "Skor Potensi" SO IT MATCHES THE OFFICIAL EXCEL FORMULA
+// (Sheet '6_Hasil_Klaster', kolom H — lihat workbook K-Means Magelang)
+// Skor = (Rating/5×0.25) + (Akses/5×0.15) + (Fasilitas/5×0.10)
+//      + (P.Alam/5×0.20) + (P.Budaya/5×0.15) + (MIN(Pendapatan,20000)/20000×0.15)
+// Dihitung dinamis dari atribut mentah tiap destinasi — tidak ada nilai hardcode.
+// ══════════════════════════════════════════════════════════════
+foreach ($destinations as &$dest) {
+    $dest['skor'] = ($dest['rating'] / 5) * 0.25
+        + ($dest['aksesibilitas'] / 5) * 0.15
+        + ($dest['fasilitas'] / 5) * 0.10
+        + ($dest['potensi_alam'] / 5) * 0.20
+        + ($dest['potensi_budaya'] / 5) * 0.15
+        + (min($dest['pendapatan'], 20000) / 20000) * 0.15;
+}
+unset($dest);
+
+// Lookup destinasi mentah by ID (dipakai untuk breakdown skor per-langkah)
+$destByID = [];
+foreach ($destinations as $d) {
+    $destByID[intval($d['id'])] = $d;
+}
+
 $evaluasi_raw = getEvaluasi($conn);
 $evaluasi = [
-    'sc'   => floatval($evaluasi_raw['sc']),
-    'dbi'  => floatval($evaluasi_raw['dbi']),
-    'chi'  => floatval($evaluasi_raw['chi']),
+    'sc' => floatval($evaluasi_raw['sc']),
+    'dbi' => floatval($evaluasi_raw['dbi']),
+    'chi' => floatval($evaluasi_raw['chi']),
     'wcss' => floatval($evaluasi_raw['wcss']),
     'iter' => intval($evaluasi_raw['iter']),
 ];
@@ -49,6 +73,308 @@ foreach ($klaster_info_raw as $k => $info) {
         'total_pend' => floatval($info['total_pend']),
         'strategi' => $info['strategi'],
     ];
+}
+
+// ══════════════════════════════════════════════════════════════
+// RUN K-MEANS++ DYNAMICALLY FOR THE STEP-BY-STEP MANUAL BOOK
+// ══════════════════════════════════════════════════════════════
+$calc = runKMeansClustering($conn);
+
+if ($calc['success']) {
+    $c1_id = $calc['c1_id'];
+    $c2_id = $calc['c2_id'];
+    $c3_id = $calc['c3_id'];
+
+    $c1_name = $calc['normData'][$c1_id]['nama'];
+    $c2_name = $calc['normData'][$c2_id]['nama'];
+    $c3_name = $calc['normData'][$c3_id]['nama'];
+
+    $total_d2_val = number_format($calc['total_d2_c1'], 4);
+    $c2_d2_val = number_format($calc['d2_c1'][$c2_id], 4);
+    $c3_d2_val = number_format($calc['d2_min'][$c3_id], 4);
+
+    $iter1_wcss = number_format($calc['iterations_history'][1]['wcss'] ?? 0, 3);
+    $iter1_counts = [1 => 0, 2 => 0, 3 => 0];
+    if (isset($calc['iterations_history'][1])) {
+        foreach ($calc['iterations_history'][1]['assignments'] as $cid) {
+            $iter1_counts[$cid]++;
+        }
+    }
+    $final_wcss = number_format($calc['wcss'], 3);
+    $total_iterations = $calc['iter_count'];
+
+    // Dynamic arrays for the tables
+    // 1. $norm (sample of 5)
+    $norm = [];
+    $count = 0;
+    foreach ($calc['normData'] as $id => $nd) {
+        $norm[] = [
+            $id,
+            $nd['nama'],
+            $nd['lon'],
+            $nd['lat'],
+            $nd['kunjungan'],
+            $nd['rating'],
+            $nd['aksesibilitas'],
+            $nd['fasilitas'],
+            $nd['potensi_alam'],
+            $nd['potensi_budaya'],
+            $nd['pendapatan'],
+            $nd['trend']
+        ];
+        $count++;
+        if ($count >= 5)
+            break;
+    }
+
+    // 2. $normData (all)
+    $normData = [];
+    foreach ($calc['normData'] as $id => $nd) {
+        $normData[] = [
+            $id,
+            $nd['nama'],
+            $nd['lon'],
+            $nd['lat'],
+            $nd['kunjungan'],
+            $nd['rating'],
+            $nd['aksesibilitas'],
+            $nd['fasilitas'],
+            $nd['potensi_alam'],
+            $nd['potensi_budaya'],
+            $nd['pendapatan'],
+            $nd['trend'],
+            $calc['assignments'][$id]
+        ];
+    }
+
+    // 3. $d2c1
+    $d2c1 = [];
+    $cum_prob = 0.0;
+    $total_d2 = $calc['total_d2_c1'];
+    foreach ($calc['normData'] as $id => $nd) {
+        $d2 = $calc['d2_c1'][$id];
+        $prob = $total_d2 == 0 ? 0.0 : $d2 / $total_d2;
+        $cum_prob += $prob;
+        $d2c1[] = [
+            $id,
+            $nd['nama'],
+            $d2,
+            $prob,
+            $cum_prob
+        ];
+    }
+
+    // 4. $d2min
+    $d2min = [];
+    foreach ($calc['normData'] as $id => $nd) {
+        $d2_1 = $calc['d2_c1'][$id];
+        $d2_2 = $calc['d2_c2'][$id];
+        $min_d = $calc['d2_min'][$id];
+
+        $ket = '';
+        if ($id == $c1_id) {
+            $ket = '=C1 itu sendiri';
+        } else if ($id == $c2_id) {
+            $ket = '=C2 itu sendiri';
+        } else if ($id == $c3_id) {
+            $ket = '=D²_min lebih kecil ← MAKS!';
+        } else {
+            $ket = $d2_1 <= $d2_2 ? '=D²(x,C1) lebih kecil' : '=D²(x,C2) lebih kecil';
+        }
+
+        $d2min[] = [
+            $id,
+            $nd['nama'],
+            $d2_1,
+            $d2_2,
+            $min_d,
+            $ket
+        ];
+    }
+
+    // 5. $skor_calc — Skor Potensi (formula resmi, sama dengan Excel '6_Hasil_Klaster')
+    // Skor = (Rating/5×0.25)+(Akses/5×0.15)+(Fasilitas/5×0.10)+(Alam/5×0.20)+(Budaya/5×0.15)+(MIN(Pendapatan,20000)/20000×0.15)
+    $skor_calc = [];
+    foreach ($calc['normData'] as $id => $nd) {
+        $raw = $destByID[intval($id)] ?? null;
+        if ($raw === null)
+            continue;
+        $rating_part = ($raw['rating'] / 5) * 0.25;
+        $akses_part = ($raw['aksesibilitas'] / 5) * 0.15;
+        $fasilitas_part = ($raw['fasilitas'] / 5) * 0.10;
+        $alam_part = ($raw['potensi_alam'] / 5) * 0.20;
+        $budaya_part = ($raw['potensi_budaya'] / 5) * 0.15;
+        $pend_part = (min($raw['pendapatan'], 20000) / 20000) * 0.15;
+        $skor_total = $rating_part + $akses_part + $fasilitas_part + $alam_part + $budaya_part + $pend_part;
+        $skor_calc[] = [
+            $id,
+            $nd['nama'],
+            $calc['assignments'][$id],
+            $rating_part,
+            $akses_part,
+            $fasilitas_part,
+            $alam_part,
+            $budaya_part,
+            $pend_part,
+            $skor_total
+        ];
+    }
+
+    // 6. $wcssK2 (Klaster 2 final WCSS contributions)
+    $wcssK2 = [];
+    $flist = ['lon', 'lat', 'kunjungan', 'rating', 'aksesibilitas', 'fasilitas', 'potensi_alam', 'potensi_budaya', 'pendapatan', 'trend'];
+    $final_centroids = $calc['final_centroids'];
+    foreach ($calc['normData'] as $id => $nd) {
+        if ($calc['assignments'][$id] == 2) {
+            $dist = 0.0;
+            foreach ($flist as $f) {
+                $dist += pow($nd[$f] - $final_centroids[2][$f], 2);
+            }
+            $wcssK2[] = [
+                $id,
+                $nd['nama'],
+                number_format(sqrt($dist), 4),
+                $dist
+            ];
+        }
+    }
+    $totalK2 = array_sum(array_column($wcssK2, 3));
+
+    // WCSS final per cluster
+    $wcss_k_final = [1 => 0.0, 2 => 0.0, 3 => 0.0];
+    foreach ($calc['normData'] as $id => $nd) {
+        $k = $calc['assignments'][$id];
+        $dist = 0.0;
+        foreach ($flist as $f) {
+            $dist += pow($nd[$f] - $final_centroids[$k][$f], 2);
+        }
+        $wcss_k_final[$k] += $dist;
+    }
+
+    // 7. $scData (Silhouette details)
+    // ── DEFINISI SAMA DENGAN EXCEL (sheet 4_Iterasi_KMeans++, baris 67) ──
+    // a(i) = jarak Euclidean titik i ke CENTROID klasternya sendiri
+    // b(i) = MIN jarak Euclidean titik i ke CENTROID klaster lain (bukan rata-rata anggota)
+    // Ini berbeda dari definisi Rousseeuw klasik, tapi konsisten dengan rumus Excel.
+    $scData = [];
+    foreach ($calc['normData'] as $id => $norm_item) {
+        $cluster = $calc['assignments'][$id];
+
+        // a(i): jarak titik ke centroid klaster sendiri
+        $dist_a = 0.0;
+        foreach ($flist as $f) {
+            $dist_a += pow($norm_item[$f] - $final_centroids[$cluster][$f], 2);
+        }
+        $a_i = sqrt($dist_a);
+
+        // b(i): MIN jarak titik ke centroid klaster lain
+        $b_dists = [];
+        for ($k = 1; $k <= 3; $k++) {
+            if ($k == $cluster)
+                continue;
+            $dist_b = 0.0;
+            foreach ($flist as $f) {
+                $dist_b += pow($norm_item[$f] - $final_centroids[$k][$f], 2);
+            }
+            $b_dists[] = sqrt($dist_b);
+        }
+        $b_i = empty($b_dists) ? 0.0 : min($b_dists);
+
+        // s(i) = (b - a) / max(a, b)
+        $s_i = (max($a_i, $b_i) == 0.0) ? 0.0 : ($b_i - $a_i) / max($a_i, $b_i);
+
+        if ($s_i >= 0.7) {
+            $interp = 'Sangat Baik';
+        } elseif ($s_i >= 0.5) {
+            $interp = 'Baik';
+        } elseif ($s_i >= 0.25) {
+            $interp = 'Lemah';
+        } else {
+            $interp = 'Salah Klaster';
+        }
+
+        $scData[] = [
+            $id,
+            $norm_item['nama'],
+            $cluster,
+            $a_i,
+            $b_i,
+            $s_i,
+            $interp
+        ];
+    }
+
+    // 8. $dbi_table
+    $dbi_table = [];
+    for ($i = 1; $i <= 3; $i++) {
+        $max_r = -1.0;
+        $best_j = -1;
+        for ($j = 1; $j <= 3; $j++) {
+            if ($i == $j)
+                continue;
+            $r_val = $calc['R_detail'][$i][$j];
+            if ($r_val > $max_r) {
+                $max_r = $r_val;
+                $best_j = $j;
+            }
+        }
+        $dbi_table[$i] = [
+            'i' => $i,
+            'sigma_i' => $calc['S_k'][$i],
+            'j' => $best_j,
+            'sigma_j' => $calc['S_k'][$best_j],
+            'd_ij' => $calc['centroid_dists'][$i][$best_j],
+            'ratio' => $max_r
+        ];
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // OVERWRITE SC / DBI / CHI DENGAN HASIL HITUNG LANGSUNG (DINAMIS)
+    // Nilai-nilai ini dihitung di sini dari $scData / $dbi_table / $calc
+    // (yang sendiri berasal dari runKMeansClustering() atas data destinasi
+    // saat ini) — TIDAK ada angka hardcode. Ini memastikan kartu metrik,
+    // hero stat, footer, dan bagian §9–§11 selalu konsisten dengan data
+    // terbaru, bukan snapshot statis dari database.
+    // ══════════════════════════════════════════════════════════════
+    $evaluasi['sc'] = empty($scData) ? 0.0 : array_sum(array_column($scData, 5)) / count($scData);
+    $evaluasi['dbi'] = empty($dbi_table) ? 0.0 : array_sum(array_column($dbi_table, 'ratio')) / count($dbi_table);
+    $evaluasi['chi'] = $calc['chi'] ?? 0.0;
+
+    // 9. $d2_c_gm
+    $d2_c_gm = [];
+    $gm = $calc['global_mean'];
+    for ($k = 1; $k <= 3; $k++) {
+        $d = 0.0;
+        foreach ($flist as $f) {
+            $d += pow($calc['final_centroids'][$k][$f] - $gm[$f], 2);
+        }
+        $d2_c_gm[$k] = $d;
+    }
+
+    $wcss_per_iter = [null, floatval($iter1_wcss), $evaluasi['wcss']];
+} else {
+    $c1_name = "N/A";
+    $c2_name = "N/A";
+    $c3_name = "N/A";
+    $total_d2_val = "0.0000";
+    $c2_d2_val = "0.0000";
+    $c3_d2_val = "0.0000";
+    $iter1_wcss = "0.000";
+    $iter1_counts = [1 => 0, 2 => 0, 3 => 0];
+    $final_wcss = "0.000";
+    $total_iterations = 0;
+    $norm = [];
+    $normData = [];
+    $d2c1 = [];
+    $d2min = [];
+    $skor_calc = [];
+    $wcssK2 = [];
+    $totalK2 = 0;
+    $wcss_k_final = [1 => 0.0, 2 => 0.0, 3 => 0.0];
+    $scData = [];
+    $dbi_table = [];
+    $d2_c_gm = [];
+    $wcss_per_iter = [null, 0.0, 0.0];
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -107,7 +433,7 @@ for ($k = 1; $k <= 3; $k++) {
 }
 
 // WCSS per iteration (Iteration 0: init, Iteration 1: calculated, Final: from database)
-$wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
+$wcss_per_iter = [null, $calc['success'] && isset($calc['iterations_history'][1]) ? $calc['iterations_history'][1]['wcss'] : 0, $evaluasi['wcss']];
 
 ?>
 <!DOCTYPE html>
@@ -125,7 +451,9 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
     <!-- Leaflet JS -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
     <!-- Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Sora:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Sora:wght@300;400;600;700;800&display=swap"
+        rel="stylesheet">
 
     <style>
         :root {
@@ -1180,17 +1508,21 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                 <div class="nav-sub">Wisata Kabupaten Magelang</div>
             </div>
         </div>
-        <button class="nav-toggle" type="button" onclick="toggleNavMenu()" aria-expanded="false" aria-controls="navMenu">☰ Menu</button>
+        <button class="nav-toggle" type="button" onclick="toggleNavMenu()" aria-expanded="false"
+            aria-controls="navMenu">☰ Menu</button>
         <div class="nav-menu" id="navMenu">
             <div class="nav-tabs">
-                <button class="nav-tab active" data-page="dashboard" onclick="showPage('dashboard', this)">Dashboard</button>
+                <button class="nav-tab active" data-page="dashboard"
+                    onclick="showPage('dashboard', this)">Dashboard</button>
                 <button class="nav-tab" data-page="peta" onclick="showPage('peta', this)">🗺 Peta SIG</button>
                 <button class="nav-tab" data-page="data" onclick="showPage('data', this)">Tabel Data</button>
                 <button class="nav-tab" data-page="analisis" onclick="showPage('analisis', this)">Analisis</button>
                 <button class="nav-tab" data-page="proyeksi" onclick="showPage('proyeksi', this)">Proyeksi</button>
                 <button class="nav-tab" data-page="algoritma" onclick="showPage('algoritma', this)">Algoritma</button>
-                <button class="nav-tab" data-page="manual" onclick="showPage('manual', this)" style="background:rgba(99,102,241,.15);color:var(--accent);border:1px solid rgba(99,102,241,.3)">Perhitungan</button>
-                <a href="admin.php" class="nav-tab" style="background:rgba(239,68,68,.15);color:#ff6b6b;border:1px solid rgba(239,68,68,.3);text-decoration:none">Admin</a>
+                <button class="nav-tab" data-page="manual" onclick="showPage('manual', this)"
+                    style="background:rgba(99,102,241,.15);color:var(--accent);border:1px solid rgba(99,102,241,.3)">Perhitungan</button>
+                <a href="admin.php" class="nav-tab"
+                    style="background:rgba(239,68,68,.15);color:#ff6b6b;border:1px solid rgba(239,68,68,.3);text-decoration:none">Admin</a>
             </div>
         </div>
     </nav>
@@ -1198,7 +1530,8 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
     <!-- HERO -->
     <div class="hero">
         <h1>Intelijen Spasial <span>K-Means++</span><br>Potensi Wisata Magelang</h1>
-        <p>Klasterisasi berbasis data spatio-temporal untuk pemodelan dinamis potensi destinasi wisata Kabupaten Magelang menggunakan algoritma K-Means++ dengan 3 klaster optimal.</p>
+        <p>Klasterisasi berbasis data spatio-temporal untuk pemodelan dinamis potensi destinasi wisata Kabupaten
+            Magelang menggunakan algoritma K-Means++ dengan 3 klaster optimal.</p>
         <div class="hero-stats">
             <div class="hstat">
                 <div class="hstat-val" style="color:var(--k1)"><?= $total_destinasi ?></div>
@@ -1248,7 +1581,7 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                             <div class="cs-lbl">Total Pendapatan</div>
                         </div>
                         <div class="cs">
-                            <div class="cs-val"><?= $info['n'] ?>/15</div>
+                            <div class="cs-val"><?= $info['n'] ?>/<?= $total_destinasi ?></div>
                             <div class="cs-lbl">Proporsi</div>
                         </div>
                     </div>
@@ -1283,15 +1616,12 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
         <div class="section-title">Peta Sebaran Spasial – Kabupaten Magelang</div>
         <div id="map"></div>
         <div class="map-legend">
-            <div class="ml-item">
-                <div class="ml-dot" style="background:var(--k1)"></div> Klaster 1: Tinggi (1 titik)
-            </div>
-            <div class="ml-item">
-                <div class="ml-dot" style="background:var(--k2)"></div> Klaster 2: Sedang (8 titik)
-            </div>
-            <div class="ml-item">
-                <div class="ml-dot" style="background:var(--k3)"></div> Klaster 3: Rendah (6 titik)
-            </div>
+            <?php foreach ($klaster_info as $k => $info): ?>
+                <div class="ml-item">
+                    <div class="ml-dot" style="background:var(--k<?= $k ?>)"></div>
+                    <?= htmlspecialchars($info['label']) ?> (<?= $info['n'] ?> titik)
+                </div>
+            <?php endforeach; ?>
             <div class="ml-item" style="margin-left:auto;font-style:italic">Klik marker untuk detail destinasi</div>
         </div>
         <div style="margin-top:1.5rem" class="chart-grid">
@@ -1312,19 +1642,22 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
 
         <!-- Filter -->
         <div style="display:flex;gap:.75rem;margin-bottom:1.25rem;flex-wrap:wrap">
-            <select id="filterKlaster" onchange="filterTable()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:.45rem .75rem;border-radius:8px;font-size:.82rem">
+            <select id="filterKlaster" onchange="filterTable()"
+                style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:.45rem .75rem;border-radius:8px;font-size:.82rem">
                 <option value="">Semua Klaster</option>
                 <option value="1">Klaster 1: Tinggi</option>
                 <option value="2">Klaster 2: Sedang</option>
                 <option value="3">Klaster 3: Rendah</option>
             </select>
-            <select id="filterZona" onchange="filterTable()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:.45rem .75rem;border-radius:8px;font-size:.82rem">
+            <select id="filterZona" onchange="filterTable()"
+                style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:.45rem .75rem;border-radius:8px;font-size:.82rem">
                 <option value="">Semua Zona</option>
                 <option value="Peak Season">Peak Season</option>
                 <option value="Mid Season">Mid Season</option>
                 <option value="Low Season">Low Season</option>
             </select>
-            <input id="searchInput" type="text" placeholder="Cari destinasi..." onkeyup="filterTable()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:.45rem .75rem;border-radius:8px;font-size:.82rem;flex:1;min-width:160px">
+            <input id="searchInput" type="text" placeholder="Cari destinasi..." onkeyup="filterTable()"
+                style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:.45rem .75rem;border-radius:8px;font-size:.82rem;flex:1;min-width:160px">
         </div>
 
         <div class="table-wrap">
@@ -1349,37 +1682,50 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                 </thead>
                 <tbody>
                     <?php foreach ($destinations as $d): ?>
-                        <tr data-klaster="<?= $d['klaster'] ?>" data-zona="<?= htmlspecialchars($d['zona']) ?>" data-nama="<?= strtolower($d['nama']) ?>">
+                        <tr data-klaster="<?= $d['klaster'] ?>" data-zona="<?= htmlspecialchars($d['zona']) ?>"
+                            data-nama="<?= strtolower($d['nama']) ?>">
                             <td style="font-family:'Space Mono',monospace;color:var(--muted)"><?= $d['id'] ?></td>
                             <td style="font-weight:600"><?= htmlspecialchars($d['nama']) ?></td>
                             <td><span class="badge k<?= $d['klaster'] ?>">K<?= $d['klaster'] ?></span></td>
                             <td style="font-family:'Space Mono',monospace"><?= number_format($d['kunjungan']) ?></td>
                             <td>
-                                <span style="color:<?= $d['rating'] >= 4.5 ? 'var(--k1)' : ($d['rating'] >= 4.0 ? 'var(--k3)' : 'var(--muted)') ?>;font-weight:700">
+                                <span
+                                    style="color:<?= $d['rating'] >= 4.5 ? 'var(--k1)' : ($d['rating'] >= 4.0 ? 'var(--k3)' : 'var(--muted)') ?>;font-weight:700">
                                     <?= $d['rating'] ?> ★
                                 </span>
                             </td>
-                            <td><?= str_repeat('●', intval($d['aksesibilitas'])) . str_repeat('○', 5 - intval($d['aksesibilitas'])) ?></td>
-                            <td><?= str_repeat('●', intval($d['fasilitas'])) . str_repeat('○', 5 - intval($d['fasilitas'])) ?></td>
-                            <td><?= str_repeat('●', intval($d['potensi_alam'])) . str_repeat('○', 5 - intval($d['potensi_alam'])) ?></td>
-                            <td><?= str_repeat('●', intval($d['potensi_budaya'])) . str_repeat('○', 5 - intval($d['potensi_budaya'])) ?></td>
+                            <td><?= str_repeat('●', intval($d['aksesibilitas'])) . str_repeat('○', 5 - intval($d['aksesibilitas'])) ?>
+                            </td>
+                            <td><?= str_repeat('●', intval($d['fasilitas'])) . str_repeat('○', 5 - intval($d['fasilitas'])) ?>
+                            </td>
+                            <td><?= str_repeat('●', intval($d['potensi_alam'])) . str_repeat('○', 5 - intval($d['potensi_alam'])) ?>
+                            </td>
+                            <td><?= str_repeat('●', intval($d['potensi_budaya'])) . str_repeat('○', 5 - intval($d['potensi_budaya'])) ?>
+                            </td>
                             <td style="font-family:'Space Mono',monospace"><?= number_format($d['pendapatan']) ?></td>
-                            <td style="color:<?= $d['trend'] >= 0.3 ? 'var(--k3)' : ($d['trend'] >= 0.15 ? 'var(--k2)' : 'var(--muted)') ?>;font-family:'Space Mono',monospace">
+                            <td
+                                style="color:<?= $d['trend'] >= 0.3 ? 'var(--k3)' : ($d['trend'] >= 0.15 ? 'var(--k2)' : 'var(--muted)') ?>;font-family:'Space Mono',monospace">
                                 +<?= round($d['trend'] * 100, 1) ?>%
                             </td>
                             <td>
                                 <?php $zc = ['Peak Season' => 'var(--k1)', 'Mid Season' => 'var(--accent)', 'Low Season' => 'var(--muted)']; ?>
-                                <span style="color:<?= $zc[$d['zona']] ?? 'var(--muted)' ?>;font-size:.75rem;font-weight:600"><?= htmlspecialchars($d['zona']) ?></span>
+                                <span
+                                    style="color:<?= $zc[$d['zona']] ?? 'var(--muted)' ?>;font-size:.75rem;font-weight:600"><?= htmlspecialchars($d['zona']) ?></span>
                             </td>
                             <td>
                                 <div style="display:flex;align-items:center;gap:.4rem">
                                     <div class="progress-bar" style="width:60px;display:inline-block">
-                                        <div class="progress-fill" style="width:<?= round($d['skor'] * 100) ?>%;background:var(--k<?= $d['klaster'] ?>)"></div>
+                                        <div class="progress-fill"
+                                            style="width:<?= round($d['skor'] * 100) ?>%;background:var(--k<?= $d['klaster'] ?>)">
+                                        </div>
                                     </div>
-                                    <span style="font-family:'Space Mono',monospace;font-size:.75rem"><?= round($d['skor'], 3) ?></span>
+                                    <span
+                                        style="font-family:'Space Mono',monospace;font-size:.75rem"><?= round($d['skor'], 3) ?></span>
                                 </div>
                             </td>
-                            <td style="font-size:.75rem;color:var(--muted);max-width:200px"><?= htmlspecialchars($d['rekomendasi']) ?></td>
+                            <td style="font-size:.75rem;color:var(--muted);max-width:200px">
+                                <?= htmlspecialchars($d['rekomendasi']) ?>
+                            </td>
                         </tr>
                     <?php endforeach; ?>
                 </tbody>
@@ -1395,37 +1741,46 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                 <div class="metric-name">Silhouette Coefficient (SC)</div>
                 <div class="metric-val" style="color:var(--k3)"><?= number_format($evaluasi['sc'], 4) ?></div>
                 <div class="progress-bar">
-                    <div class="progress-fill" style="width:<?= round($evaluasi['sc'] * 100) ?>%;background:var(--k3)"></div>
+                    <div class="progress-fill" style="width:<?= round($evaluasi['sc'] * 100) ?>%;background:var(--k3)">
+                    </div>
                 </div>
                 <div class="metric-status status-ok">✓ Baik (> 0.5)</div>
-                <div class="metric-desc">Mengukur seberapa mirip objek dengan klasternya dibanding klaster lain. Kisaran: [-1, +1]</div>
+                <div class="metric-desc">Mengukur seberapa mirip objek dengan klasternya dibanding klaster lain.
+                    Kisaran: [-1, +1]</div>
             </div>
             <div class="metric-card fade-in">
                 <div class="metric-name">Davies-Bouldin Index (DBI)</div>
                 <div class="metric-val" style="color:var(--k3)"><?= number_format($evaluasi['dbi'], 4) ?></div>
                 <div class="progress-bar">
-                    <div class="progress-fill" style="width:<?= round($evaluasi['dbi'] * 100) ?>%;background:var(--k3)"></div>
+                    <div class="progress-fill" style="width:<?= round($evaluasi['dbi'] * 100) ?>%;background:var(--k3)">
+                    </div>
                 </div>
                 <div class="metric-status status-ok">✓ Sangat Baik (< 1.0)</div>
-                        <div class="metric-desc">Rasio rata-rata dispersi intra-klaster terhadap jarak antar centroid. Semakin kecil semakin baik.</div>
+                        <div class="metric-desc">Rasio dispersi intra-klaster terhadap jarak antar centroid. Semakin
+                            kecil
+                            semakin baik.</div>
                 </div>
                 <div class="metric-card fade-in">
                     <div class="metric-name">Calinski-Harabasz Index (CHI)</div>
-                    <div class="metric-val" style="color:var(--k1)"><?= number_format($evaluasi['chi'], 3) ?></div>
+                    <div class="metric-val" style="color:var(--k1)"><?= number_format($evaluasi['chi'], 4) ?></div>
                     <div class="progress-bar">
-                        <div class="progress-fill" style="width:7%;background:var(--k1)"></div>
+                        <div class="progress-fill"
+                            style="width:<?= min(100, round($evaluasi['chi'] / 2)) ?>%;background:var(--k1)"></div>
                     </div>
                     <div class="metric-status status-warn">⚠ Perlu Perbaikan (> 100)</div>
-                    <div class="metric-desc">Rasio variance antar-klaster terhadap intra-klaster. Nilai rendah karena dataset kecil (N=15).</div>
+                    <div class="metric-desc">Rasio variance antar-klaster terhadap intra-klaster. Nilai rendah karena
+                        dataset kecil (N=15).</div>
                 </div>
                 <div class="metric-card fade-in">
                     <div class="metric-name">WCSS (Within-Cluster Sum of Squares)</div>
                     <div class="metric-val" style="color:var(--k2)"><?= number_format($evaluasi['wcss'], 4) ?></div>
                     <div class="progress-bar">
-                        <div class="progress-fill" style="width:35%;background:var(--k2)"></div>
+                        <div class="progress-fill"
+                            style="width:<?= min(100, round($evaluasi['wcss'] * 10)) ?>%;background:var(--k2)"></div>
                     </div>
-                    <div class="metric-status status-ok">✓ Konvergen Iterasi 2</div>
-                    <div class="metric-desc">Total jarak kuadrat dalam klaster. Semakin kecil = klaster semakin kompak.</div>
+                    <div class="metric-status status-ok">✓ Konvergen Iterasi <?= $evaluasi['iter'] ?></div>
+                    <div class="metric-desc">Total jarak kuadrat dalam klaster. Semakin kecil = klaster semakin kompak.
+                    </div>
                 </div>
             </div>
 
@@ -1470,19 +1825,14 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                     </thead>
                     <tbody>
                         <?php
-                        $norm = [
-                            [1, 'Candi Borobudur', 0.0391, 0.0134, 1.0000, 1.0000, 1.0000, 1.0000, 0.6667, 1.0000, 1.0000, 0.2189],
-                            [2, 'Punthuk Setumbu', 0.0000, 0.0354, 0.1285, 0.8333, 0.3333, 0.3333, 1.0000, 0.6667, 0.1416, 0.3865],
-                            [3, 'Candi Pawon', 0.0704, 0.0000, 0.0548, 0.4167, 0.6667, 0.3333, 0.3333, 1.0000, 0.0350, 0.1081],
-                            [9, 'Bukit Rhema', 0.0318, 0.0301, 0.1121, 0.7500, 0.3333, 0.3333, 0.6667, 0.6667, 0.1033, 0.8378],
-                            [14, 'Umbul Songo', 0.8854, 1.0000, 0.0033, 0.4167, 0.0000, 0.0000, 1.0000, 0.0000, 0.0019, 0.4216],
-                        ];
+                        // Use dynamic data from K-Means calculation (show first 5)
                         foreach ($norm as $r): ?>
                             <tr>
                                 <td style="font-family:'Space Mono',monospace;color:var(--muted)"><?= $r[0] ?></td>
                                 <td style="font-weight:600"><?= $r[1] ?></td>
                                 <?php for ($i = 2; $i < 12; $i++): ?>
-                                    <td style="font-family:'Space Mono',monospace;font-size:.78rem;color:<?= $r[$i] >= 0.8 ? 'var(--k1)' : ($r[$i] >= 0.5 ? 'var(--k3)' : 'var(--muted)') ?>">
+                                    <td
+                                        style="font-family:'Space Mono',monospace;font-size:.78rem;color:<?= $r[$i] >= 0.8 ? 'var(--k1)' : ($r[$i] >= 0.5 ? 'var(--k3)' : 'var(--muted)') ?>">
                                         <?= number_format($r[$i], 4) ?>
                                     </td>
                                 <?php endfor; ?>
@@ -1524,20 +1874,26 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                                 <td style="font-weight:600"><?= htmlspecialchars($p['nama']) ?></td>
                                 <td><span class="badge k<?= $p['k'] ?>">K<?= $p['k'] ?></span></td>
                                 <td style="font-family:'Space Mono',monospace"><?= number_format($p['y2024']) ?></td>
-                                <td style="font-family:'Space Mono',monospace;color:var(--text)"><?= number_format($p['y2025']) ?></td>
-                                <td style="font-family:'Space Mono',monospace;color:var(--k3)"><?= number_format($p['y2026']) ?></td>
-                                <td style="font-family:'Space Mono',monospace;color:var(--k1);font-weight:700"><?= number_format($p['y2027']) ?></td>
+                                <td style="font-family:'Space Mono',monospace;color:var(--text)">
+                                    <?= number_format($p['y2025']) ?>
+                                </td>
+                                <td style="font-family:'Space Mono',monospace;color:var(--k3)">
+                                    <?= number_format($p['y2026']) ?>
+                                </td>
+                                <td style="font-family:'Space Mono',monospace;color:var(--k1);font-weight:700">
+                                    <?= number_format($p['y2027']) ?>
+                                </td>
                                 <td>
                                     <div class="trend-bar">
-                                        <span class="trend-num" style="color:<?= $p['cagr'] >= 0.3 ? 'var(--k3)' : ($p['cagr'] >= 0.15 ? 'var(--k2)' : 'var(--muted)') ?>">
-                                            <?= round($p['cagr'] * 100, 1) ?>%
+                                        <span class="trend-num"
+                                            style="color:<?= $p['cagr'] >= 0.3 ? 'var(--k3)' : ($p['cagr'] >= 0.15 ? 'var(--k2)' : 'var(--muted)') ?>">
+                                            +<?= number_format($p['cagr'] * 100, 1) ?>%
                                         </span>
-                                        <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden">
-                                            <div style="width:<?= min(100, round($p['cagr'] * 250)) ?>%;height:100%;background:<?= $p['cagr'] >= 0.3 ? 'var(--k3)' : ($p['cagr'] >= 0.15 ? 'var(--k2)' : 'var(--muted)') ?>"></div>
-                                        </div>
                                     </div>
                                 </td>
-                                <td style="font-size:.78rem"><?= htmlspecialchars($p['kat']) ?></td>
+                                <td style="font-size:.75rem;color:var(--muted)">
+                                    <?= htmlspecialchars($p['kategori'] ?? '-') ?>
+                                </td>
                             </tr>
                         <?php endforeach; ?>
                     </tbody>
@@ -1553,41 +1909,60 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                 <div class="step fade-in">
                     <div class="step-title"><span class="step-num">1</span> Normalisasi Min-Max</div>
                     <div class="step-body">
-                        Semua fitur numerik (Longitude, Latitude, Kunjungan, Rating, Aksesibilitas, Fasilitas, Potensi Alam, Potensi Budaya, Pendapatan, Trend) dinormalisasi ke rentang [0,1] menggunakan formula:<br><br>
+                        Semua fitur numerik (Longitude, Latitude, Kunjungan, Rating, Aksesibilitas, Fasilitas, Potensi
+                        Alam, Potensi Budaya, Pendapatan, Trend) dinormalisasi ke rentang [0,1] menggunakan
+                        formula:<br><br>
                         <code>X_norm = (X − X_min) / (X_max − X_min)</code><br><br>
-                        Ini memastikan setiap fitur berkontribusi proporsional dalam perhitungan jarak Euclidean, mencegah dominasi fitur dengan skala besar seperti jumlah kunjungan.
+                        Ini memastikan setiap fitur berkontribusi proporsional dalam perhitungan jarak Euclidean,
+                        mencegah dominasi fitur dengan skala besar seperti jumlah kunjungan.
                     </div>
                 </div>
                 <div class="step fade-in">
                     <div class="step-title"><span class="step-num">2</span> Inisialisasi Centroid K-Means++ (C1)</div>
                     <div class="step-body">
-                        Centroid pertama dipilih secara acak. Dalam dataset ini, <strong>C1 = Candi Borobudur (ID=1)</strong> dipilih sebagai seed karena memiliki profil tertinggi (kunjungan dan rating tertinggi). Formula jarak kuadrat:<br><br>
+                        Centroid pertama dipilih secara acak. Dalam dataset ini, <strong>C1 =
+                            <?= htmlspecialchars($c1_name) ?> (ID=<?= $c1_id ?>)</strong> dipilih sebagai seed karena
+                        memiliki profil tertinggi (kunjungan dan rating tertinggi). Formula jarak kuadrat:<br><br>
                         <code>D²(x, C1) = Σᵢ (xᵢ − C1ᵢ)²</code><br><br>
-                        Total D² dari semua titik ke C1 = <strong>62.5019</strong>
+                        Total D² dari semua titik ke C1 = <strong><?= $total_d2_val ?></strong>
                     </div>
                 </div>
                 <div class="step fade-in">
                     <div class="step-title"><span class="step-num">3</span> Pilih C2 Berbasis Probabilitas D²</div>
                     <div class="step-body">
-                        Centroid C2 dipilih dengan probabilitas proporsional terhadap D²(x). Titik dengan jarak kuadrat terbesar ke C1 memiliki kemungkinan tertinggi untuk menjadi C2. Hasil: <strong>C2 = Umbul Songo (ID=14)</strong> dengan D² maksimum = 7.1717. Ini menjamin centroid awal tersebar jauh, menghindari inisialisasi yang buruk.
+                        Centroid C2 dipilih dengan probabilitas proporsional terhadap D²(x). Titik dengan jarak kuadrat
+                        terbesar ke C1 memiliki kemungkinan tertinggi untuk menjadi C2. Hasil: <strong>C2 =
+                            <?= htmlspecialchars($c2_name) ?> (ID=<?= $c2_id ?>)</strong> dengan D² maksimum =
+                        <?= $c2_d2_val ?>. Ini menjamin centroid awal tersebar jauh, menghindari inisialisasi yang
+                        buruk.
                     </div>
                 </div>
                 <div class="step fade-in">
                     <div class="step-title"><span class="step-num">4</span> Pilih C3 dari D²_min</div>
                     <div class="step-body">
-                        Untuk setiap titik, hitung <code>D²_min(x) = min(D²(x,C1), D²(x,C2))</code>. Titik dengan D²_min terbesar dipilih sebagai C3. Hasil: <strong>C3 = Museum Karmawibhangga (ID=11)</strong> dengan D²_min = 3.0044. Museum ini berada di cluster budaya yang berbeda dari Borobudur dan Umbul Songo.
+                        Untuk setiap titik, hitung <code>D²_min(x) = min(D²(x,C1), D²(x,C2))</code>. Titik dengan D²_min
+                        terbesar dipilih sebagai C3. Hasil: <strong>C3 = <?= htmlspecialchars($c3_name) ?>
+                            (ID=<?= $c3_id ?>)</strong> dengan D²_min = <?= $c3_d2_val ?>. Museum ini berada di cluster
+                        budaya yang berbeda dari Borobudur dan Umbul Songo.
                     </div>
                 </div>
                 <div class="step fade-in">
                     <div class="step-title"><span class="step-num">5</span> Iterasi 1 – Assignment & Update</div>
                     <div class="step-body">
-                        Setiap titik dihitung jaraknya ke C1, C2, C3 menggunakan <code>d(x,Ci) = √(Σ(xⱼ − Ciⱼ)²)</code>. Titik di-assign ke centroid terdekat. Hasil iterasi 1: Klaster 1 = 1 titik, Klaster 2 = 8 titik, Klaster 3 = 6 titik. WCSS = <strong>14.057</strong>. Centroid diupdate sebagai rata-rata titik dalam klaster.
+                        Setiap titik dihitung jaraknya ke C1, C2, C3 menggunakan <code>d(x,Ci) = √(Σ(xⱼ − Ciⱼ)²)</code>.
+                        Titik di-assign ke centroid terdekat. Hasil iterasi 1: Klaster 1 = <?= $iter1_counts[1] ?>
+                        titik, Klaster 2 = <?= $iter1_counts[2] ?> titik, Klaster 3 = <?= $iter1_counts[3] ?> titik.
+                        WCSS = <strong><?= $iter1_wcss ?></strong>. Centroid diupdate sebagai rata-rata titik dalam
+                        klaster.
                     </div>
                 </div>
                 <div class="step fade-in">
                     <div class="step-title"><span class="step-num">6</span> Iterasi 2 – Konvergensi ✓</div>
                     <div class="step-body">
-                        Assignment iterasi 2 menghasilkan distribusi yang sama dengan iterasi 1 (tidak ada perpindahan titik antar klaster). Pergeseran centroid: <code>ΔC1=0, ΔC2=0, ΔC3=0 &lt; ε=0.0001</code>. WCSS turun menjadi <strong>6.960</strong>. Algoritma <strong>KONVERGEN</strong> pada iterasi ke-2, menunjukkan dataset memiliki klaster yang jelas dan terpisah baik.
+                        Assignment iterasi terakhir menghasilkan distribusi yang sama dengan iterasi sebelumnya (tidak
+                        ada perpindahan titik antar klaster). WCSS turun menjadi <strong><?= $final_wcss ?></strong>.
+                        Algoritma <strong>KONVERGEN</strong> pada iterasi ke-<?= $total_iterations ?>, menunjukkan
+                        dataset memiliki klaster yang jelas dan terpisah baik.
                     </div>
                 </div>
             </div>
@@ -1613,48 +1988,27 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                         </tr>
                     </thead>
                     <tbody>
-                        <tr style="color:var(--k1)">
-                            <td style="font-weight:700">C1 (Tinggi)</td>
-                            <td>0.0391</td>
-                            <td>0.0134</td>
-                            <td>1.0000</td>
-                            <td>1.0000</td>
-                            <td>1.0000</td>
-                            <td>1.0000</td>
-                            <td>0.6667</td>
-                            <td>1.0000</td>
-                            <td>1.0000</td>
-                            <td>0.2189</td>
-                            <td>1</td>
-                        </tr>
-                        <tr style="color:var(--k2)">
-                            <td style="font-weight:700">C2 (Sedang)</td>
-                            <td>0.5290</td>
-                            <td>0.4492</td>
-                            <td>0.0328</td>
-                            <td>0.4271</td>
-                            <td>0.0833</td>
-                            <td>0.1250</td>
-                            <td>0.9167</td>
-                            <td>0.1667</td>
-                            <td>0.0277</td>
-                            <td>0.4807</td>
-                            <td>8</td>
-                        </tr>
-                        <tr style="color:var(--k3)">
-                            <td style="font-weight:700">C3 (Rendah)</td>
-                            <td>0.0659</td>
-                            <td>0.1151</td>
-                            <td>0.0865</td>
-                            <td>0.4583</td>
-                            <td>0.6111</td>
-                            <td>0.5000</td>
-                            <td>0.4444</td>
-                            <td>0.7778</td>
-                            <td>0.0746</td>
-                            <td>0.2545</td>
-                            <td>6</td>
-                        </tr>
+                        <?php for ($k = 1; $k <= 3; $k++):
+                            $c = $calc['final_centroids'][$k];
+                            $lbl = ($k == 1) ? 'C1 (Tinggi)' : (($k == 2) ? 'C2 (Sedang)' : 'C3 (Rendah)');
+                            $cls = ($k == 1) ? 'var(--k1)' : (($k == 2) ? 'var(--k2)' : 'var(--k3)');
+                            $n_pts = count(array_filter($calc['assignments'], fn($val) => $val == $k));
+                            ?>
+                            <tr style="color:<?= $cls ?>">
+                                <td style="font-weight:700"><?= $lbl ?></td>
+                                <td class="mono"><?= number_format($c['lon'], 4) ?></td>
+                                <td class="mono"><?= number_format($c['lat'], 4) ?></td>
+                                <td class="mono"><?= number_format($c['kunjungan'], 4) ?></td>
+                                <td class="mono"><?= number_format($c['rating'], 4) ?></td>
+                                <td class="mono"><?= number_format($c['aksesibilitas'], 4) ?></td>
+                                <td class="mono"><?= number_format($c['fasilitas'], 4) ?></td>
+                                <td class="mono"><?= number_format($c['potensi_alam'], 4) ?></td>
+                                <td class="mono"><?= number_format($c['potensi_budaya'], 4) ?></td>
+                                <td class="mono"><?= number_format($c['pendapatan'], 4) ?></td>
+                                <td class="mono"><?= number_format($c['trend'], 4) ?></td>
+                                <td class="mono"><?= $n_pts ?></td>
+                            </tr>
+                        <?php endfor; ?>
                     </tbody>
                 </table>
             </div>
@@ -1663,19 +2017,27 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
         <!-- ══════════════ PAGE: PERHITUNGAN MANUAL ══════════════ -->
         <div id="page-manual" class="page">
 
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:1.5rem;margin-bottom:2rem;flex-wrap:wrap">
-                <div class="section-title" style="margin:0;flex:1;min-width:300px">🧮 Buku Perhitungan Manual K-Means++</div>
-                <button id="btnUpdateCalc" onclick="updateCalculation()" style="padding:0.7rem 1.5rem;background:#10b981;color:white;border:none;border-radius:8px;font-weight:700;font-size:0.9rem;cursor:pointer;white-space:nowrap;box-shadow:0 4px 12px rgba(16,185,129,0.3);transition:all 0.3s ease;flex-shrink:0">📤 Update ke Database</button>
+            <div
+                style="display:flex;align-items:center;justify-content:space-between;gap:1.5rem;margin-bottom:2rem;flex-wrap:wrap">
+                <div class="section-title" style="margin:0;flex:1;min-width:300px">🧮 Buku Perhitungan Manual K-Means++
+                </div>
+                <button id="btnUpdateCalc" onclick="updateCalculation()"
+                    style="padding:0.7rem 1.5rem;background:#10b981;color:white;border:none;border-radius:8px;font-weight:700;font-size:0.9rem;cursor:pointer;white-space:nowrap;box-shadow:0 4px 12px rgba(16,185,129,0.3);transition:all 0.3s ease;flex-shrink:0">📤
+                    Update ke Database</button>
             </div>
 
-            <div style="background:linear-gradient(90deg,rgba(99,102,241,.12),transparent);border:1px solid rgba(99,102,241,.25);border-radius:14px;padding:1.25rem 1.5rem;margin-bottom:1.75rem">
+            <div
+                style="background:linear-gradient(90deg,rgba(99,102,241,.12),transparent);border:1px solid rgba(99,102,241,.25);border-radius:14px;padding:1.25rem 1.5rem;margin-bottom:1.75rem">
                 <div style="font-weight:700;font-size:.95rem;margin-bottom:.35rem">Detail Perhitungan</div>
-                <div style="font-size:.82rem;color:var(--muted);line-height:1.7">Seluruh perhitungan dilakukan langkah demi langkah menggunakan data asli dari file Excel. Setiap angka dapat ditelusuri dan diverifikasi secara manual. Klik bagian judul untuk expand/collapse.</div>
+                <div style="font-size:.82rem;color:var(--muted);line-height:1.7">Seluruh perhitungan dilakukan langkah
+                    demi langkah menggunakan data asli dari file Excel. Setiap angka dapat ditelusuri dan diverifikasi
+                    secara manual. Klik bagian judul untuk expand/collapse.</div>
             </div>
 
             <!-- TOC -->
             <div class="manual-toc fade-in">
-                <span style="font-size:.75rem;color:var(--muted);font-weight:600;align-self:center">Navigasi Cepat:</span>
+                <span style="font-size:.75rem;color:var(--muted);font-weight:600;align-self:center">Navigasi
+                    Cepat:</span>
                 <a class="toc-item" href="#sec-normalisasi">§1 Normalisasi Min-Max</a>
                 <a class="toc-item" href="#sec-init">§2 Inisialisasi K-Means++ (C1)</a>
                 <a class="toc-item" href="#sec-d2c1">§3 Jarak D²(x,C1)</a>
@@ -1701,12 +2063,17 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                     <div class="formula-box">
                         <div class="formula-title">Formula Normalisasi Min-Max</div>
                         <span class="formula-main">X_norm = (X − X_min) / (X_max − X_min)</span>
-                        <div class="formula-vars">Hasil: nilai ternormalisasi dalam rentang [0, 1]<br>X_min = nilai minimum fitur, X_max = nilai maksimum fitur</div>
+                        <div class="formula-vars">Hasil: nilai ternormalisasi dalam rentang [0, 1]<br>X_min = nilai
+                            minimum fitur, X_max = nilai maksimum fitur</div>
                     </div>
 
-                    <div class="calc-note"><strong>Mengapa dinormalisasi?</strong> Fitur memiliki skala sangat berbeda: Kunjungan (28.000 – 1.250.000) vs Rating (3,7 – 4,9). Tanpa normalisasi, fitur dengan skala besar akan mendominasi perhitungan jarak Euclidean, sehingga hasil klasterisasi menjadi bias.</div>
+                    <div class="calc-note"><strong>Mengapa dinormalisasi?</strong> Fitur memiliki skala sangat berbeda:
+                        Kunjungan (28.000 – 1.250.000) vs Rating (3,7 – 4,9). Tanpa normalisasi, fitur dengan skala
+                        besar akan mendominasi perhitungan jarak Euclidean, sehingga hasil klasterisasi menjadi bias.
+                    </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Statistik Min-Max per fitur (dari 15 data):</p>
+                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Statistik Min-Max per fitur
+                        (dari 15 data):</p>
                     <div class="table-wrap">
                         <table class="manual-table">
                             <thead>
@@ -1718,86 +2085,93 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                                 </tr>
                             </thead>
                             <tbody>
-                                <tr>
-                                    <td>Longitude</td>
-                                    <td class="mono">110.1952</td>
-                                    <td class="mono">110.4125</td>
-                                    <td class="mono">0.2173</td>
-                                </tr>
-                                <tr>
-                                    <td>Latitude</td>
-                                    <td class="mono">−7.6112</td>
-                                    <td class="mono">−7.3654</td>
-                                    <td class="mono">0.2458</td>
-                                </tr>
-                                <tr>
-                                    <td>Kunjungan/Thn</td>
-                                    <td class="mono">28.000</td>
-                                    <td class="mono">1.250.000</td>
-                                    <td class="mono">1.222.000</td>
-                                </tr>
-                                <tr>
-                                    <td>Rating</td>
-                                    <td class="mono">3,7</td>
-                                    <td class="mono">4,9</td>
-                                    <td class="mono">1,2</td>
-                                </tr>
-                                <tr>
-                                    <td>Aksesibilitas</td>
-                                    <td class="mono">2</td>
-                                    <td class="mono">5</td>
-                                    <td class="mono">3</td>
-                                </tr>
-                                <tr>
-                                    <td>Fasilitas</td>
-                                    <td class="mono">2</td>
-                                    <td class="mono">5</td>
-                                    <td class="mono">3</td>
-                                </tr>
-                                <tr>
-                                    <td>Potensi Alam</td>
-                                    <td class="mono">2</td>
-                                    <td class="mono">5</td>
-                                    <td class="mono">3</td>
-                                </tr>
-                                <tr>
-                                    <td>Potensi Budaya</td>
-                                    <td class="mono">2</td>
-                                    <td class="mono">5</td>
-                                    <td class="mono">3</td>
-                                </tr>
-                                <tr>
-                                    <td>Pendapatan (Jt)</td>
-                                    <td class="mono">210</td>
-                                    <td class="mono">18.500</td>
-                                    <td class="mono">18.290</td>
-                                </tr>
-                                <tr>
-                                    <td>Trend YoY</td>
-                                    <td class="mono">0,042</td>
-                                    <td class="mono">0,412</td>
-                                    <td class="mono">0,370</td>
-                                </tr>
+                                <?php
+                                $fitur_labels = [
+                                    'lon' => 'Longitude',
+                                    'lat' => 'Latitude',
+                                    'kunjungan' => 'Kunjungan/Thn',
+                                    'rating' => 'Rating',
+                                    'aksesibilitas' => 'Aksesibilitas',
+                                    'fasilitas' => 'Fasilitas',
+                                    'potensi_alam' => 'Potensi Alam',
+                                    'potensi_budaya' => 'Potensi Budaya',
+                                    'pendapatan' => 'Pendapatan (Jt)',
+                                    'trend' => 'Trend YoY'
+                                ];
+                                foreach ($fitur_labels as $f => $lbl):
+                                    $min_v = $calc['minMax'][$f]['min'];
+                                    $max_v = $calc['minMax'][$f]['max'];
+                                    $rng_v = $calc['minMax'][$f]['range'];
+                                    $fmt = ($f == 'lon' || $f == 'lat') ? 4 : (($f == 'kunjungan' || $f == 'pendapatan') ? 0 : 3);
+                                    ?>
+                                    <tr>
+                                        <td><?= $lbl ?></td>
+                                        <td class="mono"><?= number_format($min_v, $fmt, ',', '.') ?></td>
+                                        <td class="mono"><?= number_format($max_v, $fmt, ',', '.') ?></td>
+                                        <td class="mono"><?= number_format($rng_v, $fmt, ',', '.') ?></td>
+                                    </tr>
+                                <?php endforeach; ?>
                             </tbody>
                         </table>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0">Contoh perhitungan normalisasi untuk <strong style="color:var(--k1)">Candi Borobudur (ID=1)</strong>:</p>
+                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0">Contoh perhitungan normalisasi untuk
+                        <strong style="color:var(--k1)"><?= htmlspecialchars($c1_name) ?> (ID=<?= $c1_id ?>)</strong>:
+                    </p>
                     <div class="formula-box">
-                        <div class="formula-title">Contoh: Borobudur — Kunjungan = 1.250.000</div>
-                        <span class="formula-main">Visit_norm = (1.250.000 − 28.000) / (1.250.000 − 28.000) = 1.222.000 / 1.222.000 = <span style="color:var(--k3)">1.0000</span></span>
+                        <div class="formula-title">Contoh: <?= htmlspecialchars($c1_name) ?> — Kunjungan =
+                            <?= number_format($calc['destinations'][$c1_id]['kunjungan'], 0, ',', '.') ?>
+                        </div>
+                        <?php
+                        $visit_min = $calc['minMax']['kunjungan']['min'];
+                        $visit_max = $calc['minMax']['kunjungan']['max'];
+                        $visit_rng = $calc['minMax']['kunjungan']['range'];
+                        $visit_norm_val = $visit_rng == 0 ? 0.0 : ($calc['destinations'][$c1_id]['kunjungan'] - $visit_min) / $visit_rng;
+                        ?>
+                        <span class="formula-main">Visit_norm =
+                            (<?= number_format($calc['destinations'][$c1_id]['kunjungan'], 0, ',', '.') ?> −
+                            <?= number_format($visit_min, 0, ',', '.') ?>) /
+                            (<?= number_format($visit_max, 0, ',', '.') ?> −
+                            <?= number_format($visit_min, 0, ',', '.') ?>) =
+                            <?= number_format($calc['destinations'][$c1_id]['kunjungan'] - $visit_min, 0, ',', '.') ?> /
+                            <?= number_format($visit_rng, 0, ',', '.') ?> = <span
+                                style="color:var(--k3)"><?= number_format($visit_norm_val, 4) ?></span></span>
                         <br><br>
-                        <div class="formula-title">Contoh: Borobudur — Rating = 4,9</div>
-                        <span class="formula-main">Rating_norm = (4,9 − 3,7) / (4,9 − 3,7) = 1,2 / 1,2 = <span style="color:var(--k3)">1.0000</span></span>
+                        <div class="formula-title">Contoh: <?= htmlspecialchars($c1_name) ?> — Rating =
+                            <?= number_format($calc['destinations'][$c1_id]['rating'], 1, ',', '.') ?>
+                        </div>
+                        <?php
+                        $rate_min = $calc['minMax']['rating']['min'];
+                        $rate_max = $calc['minMax']['rating']['max'];
+                        $rate_rng = $calc['minMax']['rating']['range'];
+                        $rate_norm_val = $rate_rng == 0 ? 0.0 : ($calc['destinations'][$c1_id]['rating'] - $rate_min) / $rate_rng;
+                        ?>
+                        <span class="formula-main">Rating_norm =
+                            (<?= number_format($calc['destinations'][$c1_id]['rating'], 1, ',', '.') ?> −
+                            <?= number_format($rate_min, 1, ',', '.') ?>) /
+                            (<?= number_format($rate_max, 1, ',', '.') ?> −
+                            <?= number_format($rate_min, 1, ',', '.') ?>) =
+                            <?= number_format($calc['destinations'][$c1_id]['rating'] - $rate_min, 1, ',', '.') ?> /
+                            <?= number_format($rate_rng, 1, ',', '.') ?> = <span
+                                style="color:var(--k3)"><?= number_format($rate_norm_val, 4) ?></span></span>
                         <br><br>
-                        <div class="formula-title">Contoh: Borobudur — Aksesibilitas = 5</div>
-                        <span class="formula-main">Akses_norm = (5 − 2) / (5 − 2) = 3 / 3 = <span style="color:var(--k3)">1.0000</span></span>
-                        <br><br>
-                        <div class="formula-title">Contoh: Punthuk Setumbu — Kunjungan = 185.000</div>
-                        <span class="formula-main">Visit_norm = (185.000 − 28.000) / 1.222.000 = 157.000 / 1.222.000 = <span style="color:var(--k3)">0.1285</span></span>
+                        <div class="formula-title">Contoh: <?= htmlspecialchars($c1_name) ?> — Aksesibilitas =
+                            <?= $calc['destinations'][$c1_id]['aksesibilitas'] ?>
+                        </div>
+                        <?php
+                        $akses_min = $calc['minMax']['aksesibilitas']['min'];
+                        $akses_max = $calc['minMax']['aksesibilitas']['max'];
+                        $akses_rng = $calc['minMax']['aksesibilitas']['range'];
+                        $akses_norm_val = $akses_rng == 0 ? 0.0 : ($calc['destinations'][$c1_id]['aksesibilitas'] - $akses_min) / $akses_rng;
+                        ?>
+                        <span class="formula-main">Akses_norm = (<?= $calc['destinations'][$c1_id]['aksesibilitas'] ?> −
+                            <?= $akses_min ?>) / (<?= $akses_max ?> − <?= $akses_min ?>) =
+                            <?= $calc['destinations'][$c1_id]['aksesibilitas'] - $akses_min ?> / <?= $akses_rng ?> =
+                            <span style="color:var(--k3)"><?= number_format($akses_norm_val, 4) ?></span></span>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0">Hasil normalisasi <strong>semua 15 destinasi</strong> (10 fitur):</p>
+                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0">Hasil normalisasi <strong>semua
+                            <?= count($normData) ?> destinasi</strong> (10 fitur):</p>
                     <div class="table-wrap">
                         <table class="manual-table">
                             <thead>
@@ -1818,29 +2192,16 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                             </thead>
                             <tbody>
                                 <?php
-                                $normData = [
-                                    [1, 'Borobudur', 0.0391, 0.0134, 1.0000, 1.0000, 1.0000, 1.0000, 0.6667, 1.0000, 1.0000, 0.2189, 1],
-                                    [2, 'Punthuk Setumbu', 0.0000, 0.0354, 0.1285, 0.8333, 0.3333, 0.3333, 1.0000, 0.6667, 0.1416, 0.3865, 3],
-                                    [3, 'Candi Pawon', 0.0704, 0.0000, 0.0548, 0.4167, 0.6667, 0.3333, 0.3333, 1.0000, 0.0350, 0.1081, 3],
-                                    [4, 'Candi Mendut', 0.1500, 0.0472, 0.0794, 0.5000, 0.6667, 0.6667, 0.3333, 1.0000, 0.0541, 0.1432, 3],
-                                    [5, 'Ketep Pass', 0.2816, 0.1078, 0.1489, 0.6667, 0.3333, 0.6667, 1.0000, 0.3333, 0.1580, 0.3108, 2],
-                                    [6, 'Kopeng', 0.9480, 0.8653, 0.0573, 0.0833, 0.3333, 0.3333, 0.6667, 0.0000, 0.0312, 0.0297, 2],
-                                    [7, 'Kedung Kayang', 0.3392, 0.1627, 0.0115, 0.5833, 0.0000, 0.0000, 1.0000, 0.0000, 0.0060, 0.4838, 2],
-                                    [8, 'Telaga Bleder', 0.5812, 0.5244, 0.0057, 0.1667, 0.0000, 0.0000, 0.6667, 0.0000, 0.0038, 0.2054, 2],
-                                    [9, 'Bukit Rhema', 0.0318, 0.0301, 0.1121, 0.7500, 0.3333, 0.3333, 0.6667, 0.6667, 0.1033, 0.8378, 3],
-                                    [10, 'Sawah Sukm.', 0.1758, 0.1684, 0.0000, 0.3333, 0.0000, 0.0000, 1.0000, 0.3333, 0.0000, 0.6541, 2],
-                                    [11, 'Museum Karma', 0.0400, 0.0122, 0.0483, 0.2500, 1.0000, 0.6667, 0.0000, 1.0000, 0.0241, 0.0514, 3],
-                                    [12, 'Taman Langgeng', 0.1031, 0.5659, 0.0957, 0.0000, 0.6667, 0.6667, 0.3333, 0.3333, 0.0897, 0.0000, 3],
-                                    [13, 'Gunung Andong', 1.0000, 0.7144, 0.0221, 0.6667, 0.0000, 0.0000, 1.0000, 0.0000, 0.0115, 0.7405, 2],
-                                    [14, 'Umbul Songo', 0.8854, 1.0000, 0.0033, 0.4167, 0.0000, 0.0000, 1.0000, 0.0000, 0.0019, 0.4216, 2],
-                                    [15, 'Puthuk Mongkrong', 0.0212, 0.0509, 0.0139, 0.5000, 0.0000, 0.0000, 1.0000, 0.6667, 0.0093, 1.0000, 2],
-                                ];
-                                foreach ($normData as $r): $k = $r[12]; ?>
+                                // $normData is populated dynamically at the top of the page.
+                                foreach ($normData as $r):
+                                    $k = $r[12]; ?>
                                     <tr>
                                         <td style="font-family:'Space Mono',monospace;color:var(--muted)"><?= $r[0] ?></td>
                                         <td style="font-weight:600;font-size:.76rem"><?= $r[1] ?></td>
-                                        <?php for ($i = 2; $i <= 11; $i++): $v = $r[$i]; ?>
-                                            <td class="mono" style="color:<?= $v >= 0.9 ? 'var(--k1)' : ($v >= 0.6 ? 'var(--k3)' : ($v >= 0.3 ? 'var(--text)' : 'var(--muted)')) ?>">
+                                        <?php for ($i = 2; $i <= 11; $i++):
+                                            $v = $r[$i]; ?>
+                                            <td class="mono"
+                                                style="color:<?= $v >= 0.9 ? 'var(--k1)' : ($v >= 0.6 ? 'var(--k3)' : ($v >= 0.3 ? 'var(--text)' : 'var(--muted)')) ?>">
                                                 <?= number_format($v, 4) ?>
                                             </td>
                                         <?php endfor; ?>
@@ -1849,7 +2210,10 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                             </tbody>
                         </table>
                     </div>
-                    <div class="calc-note">🎨 <strong>Kode warna:</strong> <span style="color:var(--k1)">Emas ≥ 0.9</span> · <span style="color:var(--k3)">Hijau ≥ 0.6</span> · <span style="color:var(--text)">Putih ≥ 0.3</span> · <span style="color:var(--muted)">Abu < 0.3</span>
+                    <div class="calc-note">🎨 <strong>Kode warna:</strong> <span style="color:var(--k1)">Emas ≥
+                            0.9</span> · <span style="color:var(--k3)">Hijau ≥ 0.6</span> · <span
+                            style="color:var(--text)">Putih ≥ 0.3</span> · <span style="color:var(--muted)">Abu <
+                                0.3</span>
                     </div>
                 </div>
             </div>
@@ -1862,13 +2226,20 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                     <span style="margin-left:auto;color:var(--muted);font-size:.85rem">▼</span>
                 </div>
                 <div class="calc-body">
-                    <div class="calc-note"><strong>KeTinggi K-Means++ vs K-Means biasa:</strong> K-Means biasa memilih centroid awal secara acak penuh, yang dapat menghasilkan klaster buruk. K-Means++ memilih centroid secara cerdas — titik berikutnya dipilih dengan probabilitas proporsional terhadap jarak kuadrat ke centroid terdekat yang sudah dipilih. Ini <strong>menjamin konvergensi lebih cepat dan hasil lebih optimal</strong>.</div>
+                    <div class="calc-note"><strong>Kelebihan K-Means++ vs K-Means biasa:</strong> K-Means biasa memilih
+                        centroid awal secara acak penuh, yang dapat menghasilkan klaster buruk. K-Means++ memilih
+                        centroid secara cerdas — titik berikutnya dipilih dengan probabilitas proporsional terhadap
+                        jarak kuadrat ke centroid terdekat yang sudah dipilih. Ini <strong>menjamin konvergensi lebih
+                            cepat dan hasil lebih optimal</strong>.</div>
 
                     <div class="formula-box">
-                        <div class="formula-title">Langkah 1: Pilih C1 secara acak (atau berdasarkan domain knowledge)</div>
-                        <span class="formula-main">C1 = Titik ID=1 (Candi Borobudur)</span>
+                        <div class="formula-title">Langkah 1: Pilih C1 secara acak (atau berdasarkan domain knowledge)
+                        </div>
+                        <span class="formula-main">C1 = Titik ID=<?= $c1_id ?>
+                            (<?= htmlspecialchars($c1_name) ?>)</span>
                         <div class="formula-vars">
-                            Alasan: Borobudur adalah destinasi dengan kunjungan dan rating tertinggi,<br>
+                            Alasan: <?= htmlspecialchars($c1_name) ?> adalah destinasi dengan kunjungan/rating
+                            tinggi,<br>
                             dipilih sebagai seed pertama untuk menjamin klaster "Tinggi" teridentifikasi.<br><br>
                             Vektor C1 (ternormalisasi, 10 dimensi):
                         </div>
@@ -1891,17 +2262,18 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                                 </tr>
                             </thead>
                             <tbody>
+                                <?php $c1_norm = $calc['normData'][$c1_id]; ?>
                                 <tr class="highlight">
-                                    <td class="mono">0.0391</td>
-                                    <td class="mono">0.0134</td>
-                                    <td class="mono">1.0000</td>
-                                    <td class="mono">1.0000</td>
-                                    <td class="mono">1.0000</td>
-                                    <td class="mono">1.0000</td>
-                                    <td class="mono">0.6667</td>
-                                    <td class="mono">1.0000</td>
-                                    <td class="mono">1.0000</td>
-                                    <td class="mono">0.2189</td>
+                                    <td class="mono"><?= number_format($c1_norm['lon'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c1_norm['lat'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c1_norm['kunjungan'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c1_norm['rating'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c1_norm['aksesibilitas'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c1_norm['fasilitas'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c1_norm['potensi_alam'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c1_norm['potensi_budaya'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c1_norm['pendapatan'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c1_norm['trend'], 4) ?></td>
                                 </tr>
                             </tbody>
                         </table>
@@ -1920,29 +2292,57 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                     <div class="formula-box">
                         <div class="formula-title">Formula Jarak Kuadrat Euclidean</div>
                         <span class="formula-main">D²(x, C1) = Σᵢ₌₁¹⁰ (xᵢ − C1ᵢ)²</span>
-                        <div class="formula-vars">Menjumlahkan kuadrat selisih tiap dimensi. Semakin jauh titik dari C1, semakin besar D².</div>
+                        <div class="formula-vars">Menjumlahkan kuadrat selisih tiap dimensi. Semakin jauh titik dari C1,
+                            semakin besar D².</div>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Contoh detail untuk <strong style="color:var(--k2)">Punthuk Setumbu (ID=2)</strong>:</p>
+                    <?php
+                    $samp_id = $calc['destinations'][1]['id'] ?? 2;
+                    $samp_name = $calc['destinations'][1]['nama'] ?? 'Punthuk Setumbu';
+                    $samp_norm = $calc['normData'][$samp_id];
+                    ?>
+                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Contoh detail untuk <strong
+                            style="color:var(--k2)"><?= htmlspecialchars($samp_name) ?> (ID=<?= $samp_id ?>)</strong>:
+                    </p>
                     <div class="formula-box">
-                        <div class="formula-title">Perhitungan manual D²(ID=2, C1) — dimensi per dimensi</div>
+                        <div class="formula-title">Perhitungan manual D²(ID=<?= $samp_id ?>, C1) — dimensi per dimensi
+                        </div>
                         <span class="formula-main">
-                            (0.0000 − 0.0391)² = 0.001529<br>
-                            (0.0354 − 0.0134)² = 0.000484<br>
-                            (0.1285 − 1.0000)² = 0.759181 ← dominan (kunjungan jauh berbeda)<br>
-                            (0.8333 − 1.0000)² = 0.027779<br>
-                            (0.3333 − 1.0000)² = 0.444489<br>
-                            (0.3333 − 1.0000)² = 0.444489<br>
-                            (1.0000 − 0.6667)² = 0.111089<br>
-                            (0.6667 − 1.0000)² = 0.111089<br>
-                            (0.1416 − 1.0000)² = 0.736900<br>
-                            (0.3865 − 0.2189)² = 0.028100<br>
+                            (<?= number_format($samp_norm['lon'], 4) ?> − <?= number_format($c1_norm['lon'], 4) ?>)² =
+                            <?= number_format(pow($samp_norm['lon'] - $c1_norm['lon'], 2), 6) ?><br>
+                            (<?= number_format($samp_norm['lat'], 4) ?> − <?= number_format($c1_norm['lat'], 4) ?>)² =
+                            <?= number_format(pow($samp_norm['lat'] - $c1_norm['lat'], 2), 6) ?><br>
+                            (<?= number_format($samp_norm['kunjungan'], 4) ?> −
+                            <?= number_format($c1_norm['kunjungan'], 4) ?>)² =
+                            <?= number_format(pow($samp_norm['kunjungan'] - $c1_norm['kunjungan'], 2), 6) ?><br>
+                            (<?= number_format($samp_norm['rating'], 4) ?> −
+                            <?= number_format($c1_norm['rating'], 4) ?>)² =
+                            <?= number_format(pow($samp_norm['rating'] - $c1_norm['rating'], 2), 6) ?><br>
+                            (<?= number_format($samp_norm['aksesibilitas'], 4) ?> −
+                            <?= number_format($c1_norm['aksesibilitas'], 4) ?>)² =
+                            <?= number_format(pow($samp_norm['aksesibilitas'] - $c1_norm['aksesibilitas'], 2), 6) ?><br>
+                            (<?= number_format($samp_norm['fasilitas'], 4) ?> −
+                            <?= number_format($c1_norm['fasilitas'], 4) ?>)² =
+                            <?= number_format(pow($samp_norm['fasilitas'] - $c1_norm['fasilitas'], 2), 6) ?><br>
+                            (<?= number_format($samp_norm['potensi_alam'], 4) ?> −
+                            <?= number_format($c1_norm['potensi_alam'], 4) ?>)² =
+                            <?= number_format(pow($samp_norm['potensi_alam'] - $c1_norm['potensi_alam'], 2), 6) ?><br>
+                            (<?= number_format($samp_norm['potensi_budaya'], 4) ?> −
+                            <?= number_format($c1_norm['potensi_budaya'], 4) ?>)² =
+                            <?= number_format(pow($samp_norm['potensi_budaya'] - $c1_norm['potensi_budaya'], 2), 6) ?><br>
+                            (<?= number_format($samp_norm['pendapatan'], 4) ?> −
+                            <?= number_format($c1_norm['pendapatan'], 4) ?>)² =
+                            <?= number_format(pow($samp_norm['pendapatan'] - $c1_norm['pendapatan'], 2), 6) ?><br>
+                            (<?= number_format($samp_norm['trend'], 4) ?> − <?= number_format($c1_norm['trend'], 4) ?>)²
+                            = <?= number_format(pow($samp_norm['trend'] - $c1_norm['trend'], 2), 6) ?><br>
                             ─────────────────────────────<br>
-                            D²(ID=2, C1) = <span style="color:var(--k3)">2.6653</span>
+                            D²(ID=<?= $samp_id ?>, C1) = <span
+                                style="color:var(--k3)"><?= number_format($calc['d2_c1'][$samp_id], 4) ?></span>
                         </span>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0">D² semua titik ke C1 (Borobudur):</p>
+                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0">D² semua titik ke C1
+                        (<?= htmlspecialchars($c1_name) ?>):</p>
                     <div class="table-wrap">
                         <table class="manual-table">
                             <thead>
@@ -1956,35 +2356,150 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                             </thead>
                             <tbody>
                                 <?php
-                                $d2c1 = [
-                                    [1, 'Candi Borobudur', 0.0000, 0.0000, 0.0000],
-                                    [2, 'Punthuk Setumbu', 2.6654, 0.04264, 0.04264],
-                                    [3, 'Candi Pawon', 2.8450, 0.04552, 0.08816],
-                                    [4, 'Candi Mendut', 2.3447, 0.03752, 0.12568],
-                                    [5, 'Ketep Pass', 2.7316, 0.04371, 0.16939],
-                                    [6, 'Kopeng', 6.1441, 0.09831, 0.26770],
-                                    [7, 'Kedung Kayang', 5.4324, 0.08692, 0.35462],
-                                    [8, 'Telaga Bleder', 6.2305, 0.09970, 0.45432],
-                                    [9, 'Bukit Rhema', 3.0382, 0.04861, 0.50293],
-                                    [10, 'Sawah Sukm.', 5.2320, 0.08371, 0.58664],
-                                    [11, 'Museum Karma', 3.0044, 0.04807, 0.63471],
-                                    [12, 'Taman Langgeng', 3.7814, 0.06050, 0.69521],
-                                    [13, 'Gunung Andong', 6.8424, 0.10948, 0.80469],
-                                    [14, 'Umbul Songo', 7.1717, 0.11474, 0.91943],
-                                    [15, 'Puthuk Mongkrong', 5.0379, 0.08061, 1.00004],
-                                ];
+                                // $d2c1 is populated dynamically at the top of the page.
                                 foreach ($d2c1 as $r): ?>
-                                    <tr <?= $r[2] >= 6.0 ? 'style="background:rgba(245,158,11,.07)"' : '' ?>>
+                                    <tr <?= $r[2] >= ($calc['total_d2_c1'] / count($d2c1)) ? 'style="background:rgba(245,158,11,.07)"' : '' ?>>
                                         <td class="mono" style="color:var(--muted)"><?= $r[0] ?></td>
-                                        <td style="font-weight:600;font-size:.76rem"><?= $r[1] ?></td>
-                                        <td class="mono" style="color:<?= $r[2] >= 6.0 ? 'var(--k1)' : ($r[2] >= 3.0 ? 'var(--text)' : 'var(--muted)') ?>;font-weight:<?= $r[2] >= 6.0 ? '700' : '400' ?>"><?= number_format($r[2], 4) ?></td>
+                                        <td style="font-weight:600;font-size:.76rem"><?= htmlspecialchars($r[1]) ?></td>
+                                        <td class="mono"
+                                            style="color:<?= $r[2] >= ($calc['total_d2_c1'] / count($d2c1)) ? 'var(--k1)' : ($r[2] >= ($calc['total_d2_c1'] / (2 * count($d2c1))) ? 'var(--text)' : 'var(--muted)') ?>;font-weight:<?= $r[2] >= ($calc['total_d2_c1'] / count($d2c1)) ? '700' : '400' ?>">
+                                            <?= number_format($r[2], 4) ?>
+                                        </td>
                                         <td class="mono"><?= number_format($r[3], 5) ?></td>
                                         <td>
                                             <div style="display:flex;align-items:center;gap:.4rem">
-                                                <div style="width:80px;height:5px;background:var(--border);border-radius:2px;overflow:hidden">
-                                                    <div style="width:<?= round($r[4] * 100) ?>%;height:100%;background:var(--accent)"></div>
+                                                <div
+                                                    style="width:80px;height:5px;background:var(--border);border-radius:2px;overflow:hidden">
+                                                    <div
+                                                        style="width:<?= round($r[4] * 100) ?>%;height:100%;background:var(--accent)">
+                                                    </div>
                                                 </div>
-                                                <span class="mono" style="font-size:.72rem"><?= number_format($r[4], 4) ?></span>
+                                                <span class="mono"
+                                                    style="font-size:.72rem"><?= number_format($r[4], 4) ?></span>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                                <tr style="border-top:2px solid var(--accent)">
+                                    <td colspan="2" style="font-weight:700;color:var(--accent)">Total D²</td>
+                                    <td class="mono" style="color:var(--accent);font-weight:700"><?= $total_d2_val ?>
+                                    </td>
+                                    <td colspan="2"></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ §4: C2 ═══ -->
+            <div class="calc-section fade-in" id="sec-c2">
+                <div class="calc-section-header" onclick="toggleSection(this)">
+                    <div class="cs-num">4</div>
+                    <h3>Pemilihan Centroid C2 — Titik dengan D² Maksimum</h3>
+                    <span style="margin-left:auto;color:var(--muted);font-size:.85rem">▼</span>
+                </div>
+                <div class="calc-body">
+                    <div class="formula-box">
+                        <div class="formula-title">Kriteria Pemilihan C2</div>
+                        <span class="formula-main">C2 = argmax D²(x, C1) ← titik terjauh dari C1</span>
+                        <div class="formula-vars">
+                            Dalam praktik K-Means++, C2 dipilih dengan probabilitas proporsional D².<br>
+                            Untuk implementasi deterministik, dipilih argmax (probabilitas tertinggi).
+                        </div>
+                    </div>
+
+                    <div class="step-detail">
+                        <div class="step-detail-item">
+                            <div class="sdi-label">D² Tertinggi</div>
+                            <div class="sdi-val gold"><?= $c2_d2_val ?></div>
+                        </div>
+                        <div class="step-detail-item">
+                            <div class="sdi-label">Titik Terpilih sebagai C2</div>
+                            <div class="sdi-val blue">ID=<?= $c2_id ?> · <?= htmlspecialchars($c2_name) ?></div>
+                        </div>
+                        <div class="step-detail-item">
+                            <div class="sdi-label">Jarak ke C1 (<?= htmlspecialchars($c1_name) ?>)</div>
+                            <div class="sdi-val accent">√<?= $c2_d2_val ?> =
+                                <?= number_format(sqrt($calc['d2_c1'][$c2_id]), 4) ?>
+                            </div>
+                        </div>
+                        <div class="step-detail-item">
+                            <div class="sdi-label">Alasan Karakteristik</div>
+                            <div class="sdi-val" style="font-size:.75rem;font-family:'Sora',sans-serif">
+                                <?= htmlspecialchars($c2_name) ?> memiliki profil spasio-temporal yang paling berbeda
+                                dari <?= htmlspecialchars($c1_name) ?>.
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="table-wrap">
+                        <table class="manual-table">
+                            <thead>
+                                <tr>
+                                    <th>Lon_n</th>
+                                    <th>Lat_n</th>
+                                    <th>Visit_n</th>
+                                    <th>Rating_n</th>
+                                    <th>Akses_n</th>
+                                    <th>Fas_n</th>
+                                    <th>Alam_n</th>
+                                    <th>Bud_n</th>
+                                    <th>Pend_n</th>
+                                    <th>Trend_n</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php $c2_norm = $calc['normData'][$c2_id]; ?>
+                                <tr class="highlight2">
+                                    <td class="mono"><?= number_format($c2_norm['lon'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c2_norm['lat'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c2_norm['kunjungan'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c2_norm['rating'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c2_norm['aksesibilitas'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c2_norm['fasilitas'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c2_norm['potensi_alam'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c2_norm['potensi_budaya'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c2_norm['pendapatan'], 4) ?></td>
+                                    <td class="mono"><?= number_format($c2_norm['trend'], 4) ?></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0">D² semua titik ke C1 — pemilihan C2
+                        dari nilai terbesar:</p>
+                    <div class="table-wrap">
+                        <table class="manual-table">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Nama</th>
+                                    <th>D²(x,C1)</th>
+                                    <th>P(x) = D²/Total</th>
+                                    <th>P Kumulatif</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($d2c1 as $r): ?>
+                                    <tr <?= $r[2] >= 6.0 ? 'style="background:rgba(245,158,11,.07)"' : '' ?>>
+                                        <td class="mono" style="color:var(--muted)"><?= $r[0] ?></td>
+                                        <td style="font-weight:600;font-size:.76rem"><?= $r[1] ?></td>
+                                        <td class="mono"
+                                            style="color:<?= $r[2] >= 6.0 ? 'var(--k1)' : ($r[2] >= 3.0 ? 'var(--text)' : 'var(--muted)') ?>;font-weight:<?= $r[2] >= 6.0 ? '700' : '400' ?>">
+                                            <?= number_format($r[2], 4) ?>
+                                        </td>
+                                        <td class="mono"><?= number_format($r[3], 5) ?></td>
+                                        <td>
+                                            <div style="display:flex;align-items:center;gap:.4rem">
+                                                <div
+                                                    style="width:80px;height:5px;background:var(--border);border-radius:2px;overflow:hidden">
+                                                    <div
+                                                        style="width:<?= round($r[4] * 100) ?>%;height:100%;background:var(--accent)">
+                                                    </div>
+                                                </div>
+                                                <span class="mono"
+                                                    style="font-size:.72rem"><?= number_format($r[4], 4) ?></span>
                                             </div>
                                         </td>
                                     </tr>
@@ -2017,58 +2532,11 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                         </div>
                     </div>
 
-                    <div class="step-detail">
-                        <div class="step-detail-item">
-                            <div class="sdi-label">D² Tertinggi</div>
-                            <div class="sdi-val gold">7.1717</div>
-                        </div>
-                        <div class="step-detail-item">
-                            <div class="sdi-label">Titik Terpilih sebagai C2</div>
-                            <div class="sdi-val blue">ID=14 · Umbul Songo</div>
-                        </div>
-                        <div class="step-detail-item">
-                            <div class="sdi-label">Jarak ke C1 (Borobudur)</div>
-                            <div class="sdi-val accent">√7.1717 = 2.6780</div>
-                        </div>
-                        <div class="step-detail-item">
-                            <div class="sdi-label">Alasan Geografis</div>
-                            <div class="sdi-val" style="font-size:.75rem;font-family:'Sora',sans-serif">Umbul Songo berada di ujung utara Magelang (Lat paling rendah = −7.3654), sangat jauh dari Borobudur di selatan</div>
-                        </div>
-                    </div>
-
-                    <div class="table-wrap">
-                        <table class="manual-table">
-                            <thead>
-                                <tr>
-                                    <th>Lon_n</th>
-                                    <th>Lat_n</th>
-                                    <th>Visit_n</th>
-                                    <th>Rating_n</th>
-                                    <th>Akses_n</th>
-                                    <th>Fas_n</th>
-                                    <th>Alam_n</th>
-                                    <th>Bud_n</th>
-                                    <th>Pend_n</th>
-                                    <th>Trend_n</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr class="highlight2">
-                                    <td class="mono">0.8854</td>
-                                    <td class="mono">1.0000</td>
-                                    <td class="mono">0.0033</td>
-                                    <td class="mono">0.4167</td>
-                                    <td class="mono">0.0000</td>
-                                    <td class="mono">0.0000</td>
-                                    <td class="mono">1.0000</td>
-                                    <td class="mono">0.0000</td>
-                                    <td class="mono">0.0019</td>
-                                    <td class="mono">0.4216</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                    <div class="calc-result">✓ <strong>C2 = Umbul Songo</strong> — Berbeda jauh dari Borobudur: aksesibilitas rendah (0), budaya rendah (0), pengunjung sedikit (0.0033), tapi potensi alam tinggi (1.0) dan berada di posisi geografi paling utara.</div>
+                    <div class="calc-result">✓ <strong>C2 = <?= htmlspecialchars($c2_name) ?></strong> — Memiliki profil
+                        spasio-temporal paling berbeda dari <?= htmlspecialchars($c1_name) ?>:
+                        aksesibilitas=<?= number_format($calc['normData'][$c2_id]['aksesibilitas'], 4) ?>,
+                        budaya=<?= number_format($calc['normData'][$c2_id]['potensi_budaya'], 4) ?>,
+                        kunjungan=<?= number_format($calc['normData'][$c2_id]['kunjungan'], 4) ?>.</div>
                 </div>
             </div>
 
@@ -2089,22 +2557,24 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                         </div>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Contoh perhitungan D²(x, C2) untuk <strong style="color:var(--k3)">Museum Karmawibhangga (ID=11)</strong>:</p>
+                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Contoh perhitungan D²(x, C2)
+                        untuk <strong style="color:var(--k3)"><?= htmlspecialchars($c3_name) ?>
+                            (ID=<?= $c3_id ?>)</strong>:</p>
                     <div class="formula-box">
-                        <div class="formula-title">D²(ID=11, C2=Umbul Songo)</div>
+                        <div class="formula-title">D²(ID=<?= $c3_id ?>, C2=<?= htmlspecialchars($c2_name) ?>)</div>
+                        <?php
+                        $samp3_norm = $calc['normData'][$c3_id];
+                        $c2_norm_samp = $calc['normData'][$c2_id];
+                        $features_list = ['lon', 'lat', 'kunjungan', 'rating', 'aksesibilitas', 'fasilitas', 'potensi_alam', 'potensi_budaya', 'pendapatan', 'trend'];
+                        ?>
                         <span class="formula-main">
-                            (0.0400 − 0.8854)² = 0.71467<br>
-                            (0.0122 − 1.0000)² = 0.97558<br>
-                            (0.0483 − 0.0033)² = 0.00203<br>
-                            (0.2500 − 0.4167)² = 0.02779<br>
-                            (1.0000 − 0.0000)² = 1.00000<br>
-                            (0.6667 − 0.0000)² = 0.44449<br>
-                            (0.0000 − 1.0000)² = 1.00000<br>
-                            (1.0000 − 0.0000)² = 1.00000<br>
-                            (0.0241 − 0.0019)² = 0.00049<br>
-                            (0.0514 − 0.4216)² = 0.13705<br>
+                            <?php foreach ($features_list as $fi): ?>
+                                (<?= number_format($samp3_norm[$fi], 4) ?> − <?= number_format($c2_norm_samp[$fi], 4) ?>)² =
+                                <?= number_format(pow($samp3_norm[$fi] - $c2_norm_samp[$fi], 2), 5) ?><br>
+                            <?php endforeach; ?>
                             ──────────────────────────<br>
-                            D²(ID=11, C2) = <span style="color:var(--k3)">5.3021</span>
+                            D²(ID=<?= $c3_id ?>, C2) = <span
+                                style="color:var(--k3)"><?= number_format($calc['d2_c2'][$c3_id], 4) ?></span>
                         </span>
                     </div>
 
@@ -2121,38 +2591,27 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php
-                                $d2min = [
-                                    [1, 'Borobudur', 0.0000, 7.1717, 0.0000, '=D²(x,C1) lebih kecil'],
-                                    [2, 'Punthuk Setumbu', 2.6654, 2.5911, 2.5911, '=D²(x,C2) lebih kecil'],
-                                    [3, 'Candi Pawon', 2.8450, 3.7663, 2.8450, '=D²(x,C1) lebih kecil'],
-                                    [4, 'Candi Mendut', 2.3447, 3.8749, 2.3447, '=D²(x,C1) lebih kecil'],
-                                    [5, 'Ketep Pass', 2.7316, 1.9476, 1.9476, '=D²(x,C2) lebih kecil'],
-                                    [6, 'Kopeng', 6.1441, 0.6238, 0.6238, '=D²(x,C2) lebih kecil'],
-                                    [7, 'Kedung Kayang', 5.4324, 1.0311, 1.0311, '=D²(x,C2) lebih kecil'],
-                                    [8, 'Telaga Bleder', 6.2305, 0.5391, 0.5391, '=D²(x,C2) lebih kecil'],
-                                    [9, 'Bukit Rhema', 3.0382, 2.7537, 2.7537, '=D²(x,C2) lebih kecil'],
-                                    [10, 'Sawah Sukm.', 5.2320, 1.3672, 1.3672, '=D²(x,C2) lebih kecil'],
-                                    [11, 'Museum Karma', 3.0044, 5.3021, 3.0044, '=D²(x,C1) lebih kecil ← MAKS!'],
-                                    [12, 'Taman Langgeng', 3.7814, 2.6125, 2.6125, '=D²(x,C2) lebih kecil'],
-                                    [13, 'Gunung Andong', 6.8424, 0.2594, 0.2594, '=D²(x,C2) lebih kecil'],
-                                    [14, 'Umbul Songo', 7.1717, 0.0000, 0.0000, '=C2 itu sendiri'],
-                                    [15, 'Puthuk Mongkrong', 5.0379, 2.4339, 2.4339, '=D²(x,C2) lebih kecil'],
-                                ];
-                                foreach ($d2min as $r): $isMax = strpos($r[5], 'MAKS') !== false; ?>
+                                <?php foreach ($d2min as $r):
+                                    $isMax = strpos($r[5], 'MAKS') !== false; ?>
                                     <tr <?= $isMax ? 'style="background:rgba(16,185,129,.1)"' : '' ?>>
                                         <td class="mono" style="color:var(--muted)"><?= $r[0] ?></td>
-                                        <td style="font-weight:600;font-size:.76rem"><?= $r[1] ?></td>
+                                        <td style="font-weight:600;font-size:.76rem"><?= htmlspecialchars($r[1]) ?></td>
                                         <td class="mono"><?= number_format($r[2], 4) ?></td>
                                         <td class="mono"><?= number_format($r[3], 4) ?></td>
-                                        <td class="mono <?= $isMax ? 'highlight3' : '' ?>"><?= number_format($r[4], 4) ?></td>
-                                        <td style="font-size:.72rem;color:<?= $isMax ? 'var(--k3)' : 'var(--muted)' ?>"><?= $r[5] ?></td>
+                                        <td class="mono <?= $isMax ? 'highlight3' : '' ?>"><?= number_format($r[4], 4) ?>
+                                        </td>
+                                        <td style="font-size:.72rem;color:<?= $isMax ? 'var(--k3)' : 'var(--muted)' ?>">
+                                            <?= $r[5] ?>
+                                        </td>
                                     </tr>
                                 <?php endforeach; ?>
                             </tbody>
                         </table>
                     </div>
-                    <div class="calc-result">✓ <strong>C3 = Museum Karmawibhangga (ID=11)</strong> — D²_min = 3.0044 adalah yang terbesar. Museum ini memiliki aksesibilitas tinggi (5) dan budaya tinggi (5) seperti Borobudur, namun kunjungan jauh lebih rendah — membentuk klaster "Rendah" yang berbeda.</div>
+                    <div class="calc-result">✓ <strong>C3 = <?= htmlspecialchars($c3_name) ?>
+                            (ID=<?= $c3_id ?>)</strong> — D²_min = <?= $c3_d2_val ?>
+                        adalah yang terbesar. Destinasi ini memiliki profil yang paling berbeda dari kedua centroid
+                        sebelumnya.</div>
                 </div>
             </div>
 
@@ -2183,10 +2642,13 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                     <div class="formula-box">
                         <div class="formula-title">Formula Jarak Euclidean (bukan kuadrat) untuk assignment</div>
                         <span class="formula-main">d(x, Ci) = √[ Σⱼ (xⱼ − Ciⱼ)² ]</span>
-                        <div class="formula-vars">Setiap titik dihitung jaraknya ke C1, C2, C3. Titik di-assign ke centroid dengan jarak TERKECIL.</div>
+                        <div class="formula-vars">Setiap titik dihitung jaraknya ke C1, C2, C3. Titik di-assign ke
+                            centroid dengan jarak TERKECIL.</div>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0">Contoh detail assignment untuk <strong style="color:var(--k3)">Candi Mendut (ID=4)</strong>:</p>
+                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0">Contoh detail assignment untuk
+                        <strong style="color:var(--k3)">Candi Mendut (ID=4)</strong>:
+                    </p>
                     <div class="formula-box">
                         <div class="formula-title">d(ID=4, C1=Borobudur) = √D²(ID=4,C1) = √2.3447 = 1.5312</div>
                         <span class="formula-main" style="font-size:.8rem">
@@ -2196,10 +2658,12 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                         </span>
                         <br><br>
                         <div class="formula-title">d(ID=4, C2=Umbul Songo) = √3.8749 = 1.9685</div>
-                        <div class="formula-title">d(ID=4, C3=Museum Karma) = √0.3082 = 0.5553 ← MINIMUM → Klaster 3</div>
+                        <div class="formula-title">d(ID=4, C3=Museum Karma) = √0.3082 = 0.5553 ← MINIMUM → Klaster 3
+                        </div>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0">Hasil assignment semua titik pada Iterasi 1:</p>
+                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0">Hasil assignment semua titik pada
+                        Iterasi 1:</p>
                     <div class="table-wrap">
                         <table class="manual-table">
                             <thead>
@@ -2215,123 +2679,118 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                             </thead>
                             <tbody>
                                 <?php
-                                $iter1 = [
-                                    [1, 'Borobudur', 0.0000, 2.6780, 1.7333, 'C1 = 0.0000', 1],
-                                    [2, 'Punthuk Setumbu', 1.6326, 1.6097, 1.4634, 'C3 = 1.4634', 3],
-                                    [3, 'Candi Pawon', 1.6867, 1.9407, 0.6046, 'C3 = 0.6046', 3],
-                                    [4, 'Candi Mendut', 1.5312, 1.9685, 0.5553, 'C3 = 0.5553', 3],
-                                    [5, 'Ketep Pass', 1.6528, 1.3956, 1.4918, 'C2 = 1.3956', 2],
-                                    [6, 'Kopeng', 2.4787, 0.7898, 1.8922, 'C2 = 0.7898', 2],
-                                    [7, 'Kedung Kayang', 2.3308, 1.0154, 1.9638, 'C2 = 1.0154', 2],
-                                    [8, 'Telaga Bleder', 2.4961, 0.7342, 1.8647, 'C2 = 0.7342', 2],
-                                    [9, 'Bukit Rhema', 1.7431, 1.6594, 1.4108, 'C3 = 1.4108', 3],
-                                    [10, 'Sawah Sukm.', 2.2874, 1.1693, 1.8179, 'C2 = 1.1693', 2],
-                                    [11, 'Museum Karma', 1.7333, 2.3027, 0.0000, 'C3 = 0.0000', 3],
-                                    [12, 'Taman Langgeng', 1.9446, 1.6163, 1.0242, 'C3 = 1.0242', 3],
-                                    [13, 'Gunung Andong', 2.6158, 0.5093, 2.3470, 'C2 = 0.5093', 2],
-                                    [14, 'Umbul Songo', 2.6780, 0.0000, 2.3027, 'C2 = 0.0000', 2],
-                                    [15, 'Puthuk Mongkrong', 2.2445, 1.5601, 1.8765, 'C2 = 1.5601', 2],
-                                ];
-                                foreach ($iter1 as $r): ?>
-                                    <tr>
-                                        <td class="mono" style="color:var(--muted)"><?= $r[0] ?></td>
-                                        <td style="font-weight:600;font-size:.76rem"><?= $r[1] ?></td>
-                                        <td class="mono <?= $r[6] == 1 ? 'highlight' : '' ?>"><?= $r[2] ?></td>
-                                        <td class="mono <?= $r[6] == 2 ? 'highlight2' : '' ?>"><?= $r[3] ?></td>
-                                        <td class="mono <?= $r[6] == 3 ? 'highlight3' : '' ?>"><?= $r[4] ?></td>
-                                        <td class="mono" style="color:var(--muted);font-size:.72rem"><?= $r[5] ?></td>
-                                        <td><span class="assign-badge ab<?= $r[6] ?>">K<?= $r[6] ?></span></td>
-                                    </tr>
-                                <?php endforeach; ?>
+                                // Dynamically build iter1 from iterations_history[1] using C1,C2,C3 initial centroids
+                                $ih1 = $calc['iterations_history'][1] ?? null;
+                                if ($ih1):
+                                    $ic0 = [1 => $calc['normData'][$c1_id], 2 => $calc['normData'][$c2_id], 3 => $calc['normData'][$c3_id]];
+                                    $flist = ['lon', 'lat', 'kunjungan', 'rating', 'aksesibilitas', 'fasilitas', 'potensi_alam', 'potensi_budaya', 'pendapatan', 'trend'];
+                                    foreach ($calc['normData'] as $did => $dn):
+                                        $ass1 = $ih1['assignments'][$did];
+                                        $dists = [];
+                                        for ($kk = 1; $kk <= 3; $kk++) {
+                                            $d = 0;
+                                            foreach ($flist as $ff)
+                                                $d += pow($dn[$ff] - $ic0[$kk][$ff], 2);
+                                            $dists[$kk] = sqrt($d);
+                                        }
+                                        $min_k = array_search(min($dists), $dists);
+                                        $min_lbl = 'C' . $min_k . ' = ' . number_format($dists[$min_k], 4);
+                                        ?>
+                                        <tr>
+                                            <td class="mono" style="color:var(--muted)"><?= $did ?></td>
+                                            <td style="font-weight:600;font-size:.76rem"><?= htmlspecialchars($dn['nama']) ?>
+                                            </td>
+                                            <td class="mono <?= $ass1 == 1 ? 'highlight' : '' ?>">
+                                                <?= number_format($dists[1], 4) ?>
+                                            </td>
+                                            <td class="mono <?= $ass1 == 2 ? 'highlight2' : '' ?>">
+                                                <?= number_format($dists[2], 4) ?>
+                                            </td>
+                                            <td class="mono <?= $ass1 == 3 ? 'highlight3' : '' ?>">
+                                                <?= number_format($dists[3], 4) ?>
+                                            </td>
+                                            <td class="mono" style="color:var(--muted);font-size:.72rem"><?= $min_lbl ?></td>
+                                            <td><span class="assign-badge ab<?= $ass1 ?>">K<?= $ass1 ?></span></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
                             </tbody>
                         </table>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0 .5rem">Hasil distribusi Iterasi 1: <span class="assign-badge ab1">K1: 1 titik</span> &nbsp;<span class="assign-badge ab2">K2: 8 titik</span> &nbsp;<span class="assign-badge ab3">K3: 6 titik</span></p>
+                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0 .5rem">Hasil distribusi Iterasi 1:
+                        <?php foreach ([1, 2, 3] as $kk): ?>
+                            <span class="assign-badge ab<?= $kk ?>">K<?= $kk ?>: <?= $iter1_counts[$kk] ?> titik</span>
+                            &nbsp;
+                        <?php endforeach; ?>
+                    </p>
 
                     <div class="formula-box">
                         <div class="formula-title">Update Centroid Baru = RATA-RATA titik dalam klaster</div>
                         <span class="formula-main">C_baru(k) = (1/nₖ) × Σ xᵢ untuk semua xᵢ ∈ klaster k</span>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0 .5rem">Contoh update C2 (8 titik: ID=5,6,7,8,10,13,14,15):</p>
-                    <div class="formula-box">
-                        <div class="formula-title">C2_baru[Visit_n] = (0.1489 + 0.0573 + 0.0115 + 0.0057 + 0.0000 + 0.0221 + 0.0033 + 0.0139) / 8</div>
-                        <span class="formula-main">= 0.2627 / 8 = <span style="color:var(--k2)">0.0328</span></span>
-                        <br><br>
-                        <div class="formula-title">C2_baru[Lon_n] = (0.2816+0.9480+0.3392+0.5812+0.1758+1.0000+0.8854+0.0212) / 8</div>
-                        <span class="formula-main">= 4.2324 / 8 = <span style="color:var(--k2)">0.5291</span></span>
-                    </div>
-
-                    <div class="table-wrap">
-                        <table class="manual-table">
-                            <thead>
-                                <tr>
-                                    <th>Centroid</th>
-                                    <th>n</th>
-                                    <th>Lon_n</th>
-                                    <th>Lat_n</th>
-                                    <th>Visit_n</th>
-                                    <th>Rating_n</th>
-                                    <th>Akses_n</th>
-                                    <th>Fas_n</th>
-                                    <th>Alam_n</th>
-                                    <th>Bud_n</th>
-                                    <th>Pend_n</th>
-                                    <th>Trend_n</th>
-                                    <th>WCSS</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr class="highlight">
-                                    <td>C1_baru</td>
-                                    <td>1</td>
-                                    <td>0.0391</td>
-                                    <td>0.0134</td>
-                                    <td>1.0000</td>
-                                    <td>1.0000</td>
-                                    <td>1.0000</td>
-                                    <td>1.0000</td>
-                                    <td>0.6667</td>
-                                    <td>1.0000</td>
-                                    <td>1.0000</td>
-                                    <td>0.2189</td>
-                                    <td>0.0000</td>
-                                </tr>
-                                <tr class="highlight2">
-                                    <td>C2_baru</td>
-                                    <td>8</td>
-                                    <td>0.5291</td>
-                                    <td>0.4492</td>
-                                    <td>0.0328</td>
-                                    <td>0.4271</td>
-                                    <td>0.0833</td>
-                                    <td>0.1250</td>
-                                    <td>0.9167</td>
-                                    <td>0.1667</td>
-                                    <td>0.0277</td>
-                                    <td>0.4807</td>
-                                    <td>8.2020</td>
-                                </tr>
-                                <tr class="highlight3">
-                                    <td>C3_baru</td>
-                                    <td>6</td>
-                                    <td>0.0659</td>
-                                    <td>0.1151</td>
-                                    <td>0.0865</td>
-                                    <td>0.4583</td>
-                                    <td>0.6111</td>
-                                    <td>0.5000</td>
-                                    <td>0.4444</td>
-                                    <td>0.7778</td>
-                                    <td>0.0746</td>
-                                    <td>0.2545</td>
-                                    <td>5.8549</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                    <div class="calc-result">WCSS Iterasi 1 = 0 + 8.2020 + 5.8549 = <strong>14.0569</strong></div>
+                    <?php if ($ih1 && isset($calc['iterations_history'][2])):
+                        $ic1 = $calc['iterations_history'][2]['centroids']; ?>
+                        <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0 .5rem">Centroid hasil update setelah
+                            Iterasi 1:</p>
+                        <div class="table-wrap">
+                            <table class="manual-table">
+                                <thead>
+                                    <tr>
+                                        <th>Centroid</th>
+                                        <th>n</th>
+                                        <th>Lon_n</th>
+                                        <th>Lat_n</th>
+                                        <th>Visit_n</th>
+                                        <th>Rating_n</th>
+                                        <th>Akses_n</th>
+                                        <th>Fas_n</th>
+                                        <th>Alam_n</th>
+                                        <th>Bud_n</th>
+                                        <th>Pend_n</th>
+                                        <th>Trend_n</th>
+                                        <th>WCSS</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php
+                                    $cls = ['highlight', 'highlight2', 'highlight3'];
+                                    for ($kk = 1; $kk <= 3; $kk++):
+                                        $cc = $ic1[$kk];
+                                        $n_kk = $iter1_counts[$kk];
+                                        // WCSS contribution for this cluster in iter1
+                                        $wcss_k = 0;
+                                        foreach ($calc['normData'] as $did => $dn) {
+                                            if ($ih1['assignments'][$did] == $kk) {
+                                                $d = 0;
+                                                foreach ($flist as $ff)
+                                                    $d += pow($dn[$ff] - $cc[$ff], 2);
+                                                $wcss_k += $d;
+                                            }
+                                        }
+                                        ?>
+                                        <tr class="<?= $cls[$kk - 1] ?>">
+                                            <td>C<?= $kk ?>_baru</td>
+                                            <td><?= $n_kk ?></td>
+                                            <td><?= number_format($cc['lon'], 4) ?></td>
+                                            <td><?= number_format($cc['lat'], 4) ?></td>
+                                            <td><?= number_format($cc['kunjungan'], 4) ?></td>
+                                            <td><?= number_format($cc['rating'], 4) ?></td>
+                                            <td><?= number_format($cc['aksesibilitas'], 4) ?></td>
+                                            <td><?= number_format($cc['fasilitas'], 4) ?></td>
+                                            <td><?= number_format($cc['potensi_alam'], 4) ?></td>
+                                            <td><?= number_format($cc['potensi_budaya'], 4) ?></td>
+                                            <td><?= number_format($cc['pendapatan'], 4) ?></td>
+                                            <td><?= number_format($cc['trend'], 4) ?></td>
+                                            <td><?= number_format($wcss_k, 4) ?></td>
+                                        </tr>
+                                    <?php endfor; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php endif; ?>
+                    <div class="calc-result">WCSS Iterasi 1 = <strong><?= $iter1_wcss ?></strong></div>
                 </div>
             </div>
 
@@ -2343,9 +2802,11 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                     <span style="margin-left:auto;color:var(--muted);font-size:.85rem">▼</span>
                 </div>
                 <div class="calc-body">
-                    <div class="calc-note"><strong>Centroid Iter-1 yang digunakan:</strong> C1 sama (hanya 1 titik), C2 dan C3 telah diupdate setelah iterasi 1.</div>
+                    <div class="calc-note"><strong>Centroid Iter-1 yang digunakan:</strong> C1 sama (hanya 1 titik), C2
+                        dan C3 telah diupdate setelah iterasi 1.</div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Hasil assignment Iterasi 2 (dengan centroid baru dari Iter-1):</p>
+                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Hasil assignment Iterasi 2
+                        (dengan centroid baru dari Iter-1):</p>
                     <div class="table-wrap">
                         <table class="manual-table">
                             <thead>
@@ -2362,51 +2823,61 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                             </thead>
                             <tbody>
                                 <?php
-                                $iter2 = [
-                                    [1, 'Borobudur', 0.0000, 2.2517, 1.5801, 'C1 = 0.0000', 1, false],
-                                    [2, 'Punthuk Setumbu', 1.6326, 1.0050, 0.7752, 'C3 = 0.7752', 3, false],
-                                    [3, 'Candi Pawon', 1.6867, 1.4036, 0.3628, 'C3 = 0.3628', 3, false],
-                                    [4, 'Candi Mendut', 1.5312, 1.4477, 0.3448, 'C3 = 0.3448', 3, false],
-                                    [5, 'Ketep Pass', 1.6528, 0.8277, 0.8457, 'C2 = 0.8277', 2, false],
-                                    [6, 'Kopeng', 2.4787, 0.9311, 1.5146, 'C2 = 0.9311', 2, false],
-                                    [7, 'Kedung Kayang', 2.3308, 0.4481, 1.3010, 'C2 = 0.4481', 2, false],
-                                    [8, 'Telaga Bleder', 2.4961, 0.5159, 1.3453, 'C2 = 0.5159', 2, false],
-                                    [9, 'Bukit Rhema', 1.7431, 1.0417, 0.7758, 'C3 = 0.7758', 3, false],
-                                    [10, 'Sawah Sukm.', 2.2874, 0.5492, 1.1545, 'C2 = 0.5492', 2, false],
-                                    [11, 'Museum Karma', 1.7333, 1.8206, 0.7252, 'C3 = 0.7252', 3, false],
-                                    [12, 'Taman Langgeng', 1.9446, 1.2720, 0.8488, 'C3 = 0.8488', 3, false],
-                                    [13, 'Gunung Andong', 2.6158, 0.6890, 1.7483, 'C2 = 0.6890', 2, false],
-                                    [14, 'Umbul Songo', 2.6780, 0.7020, 1.7417, 'C2 = 0.7020', 2, false],
-                                    [15, 'Puthuk Mongkrong', 2.2445, 0.9858, 1.2319, 'C2 = 0.9858', 2, false],
-                                ];
-                                foreach ($iter2 as $r): ?>
-                                    <tr>
-                                        <td class="mono" style="color:var(--muted)"><?= $r[0] ?></td>
-                                        <td style="font-weight:600;font-size:.76rem"><?= $r[1] ?></td>
-                                        <td class="mono <?= $r[6] == 1 ? 'highlight' : '' ?>"><?= $r[2] ?></td>
-                                        <td class="mono <?= $r[6] == 2 ? 'highlight2' : '' ?>"><?= $r[3] ?></td>
-                                        <td class="mono <?= $r[6] == 3 ? 'highlight3' : '' ?>"><?= $r[4] ?></td>
-                                        <td class="mono" style="color:var(--muted);font-size:.72rem"><?= $r[5] ?></td>
-                                        <td><span class="assign-badge ab<?= $r[6] ?>">K<?= $r[6] ?></span></td>
-                                        <td style="font-size:.72rem;color:var(--k3)">✓ Sama</td>
-                                    </tr>
-                                <?php endforeach; ?>
+                                if ($calc['success']):
+                                    $fc = $calc['final_centroids'];
+                                    $flist = ['lon', 'lat', 'kunjungan', 'rating', 'aksesibilitas', 'fasilitas', 'potensi_alam', 'potensi_budaya', 'pendapatan', 'trend'];
+                                    foreach ($calc['normData'] as $did => $dn):
+                                        $final_ass = $calc['assignments'][$did];
+                                        $dists = [];
+                                        for ($kk = 1; $kk <= 3; $kk++) {
+                                            $d = 0;
+                                            foreach ($flist as $ff)
+                                                $d += pow($dn[$ff] - $fc[$kk][$ff], 2);
+                                            $dists[$kk] = sqrt($d);
+                                        }
+                                        $min_k = array_search(min($dists), $dists);
+                                        $min_lbl = 'C' . $min_k . ' = ' . number_format($dists[$min_k], 4);
+                                        ?>
+                                        <tr>
+                                            <td class="mono" style="color:var(--muted)"><?= $did ?></td>
+                                            <td style="font-weight:600;font-size:.76rem"><?= htmlspecialchars($dn['nama']) ?>
+                                            </td>
+                                            <td class="mono <?= $final_ass == 1 ? 'highlight' : '' ?>">
+                                                <?= number_format($dists[1], 4) ?>
+                                            </td>
+                                            <td class="mono <?= $final_ass == 2 ? 'highlight2' : '' ?>">
+                                                <?= number_format($dists[2], 4) ?>
+                                            </td>
+                                            <td class="mono <?= $final_ass == 3 ? 'highlight3' : '' ?>">
+                                                <?= number_format($dists[3], 4) ?>
+                                            </td>
+                                            <td class="mono" style="color:var(--muted);font-size:.72rem"><?= $min_lbl ?></td>
+                                            <td><span class="assign-badge ab<?= $final_ass ?>">K<?= $final_ass ?></span></td>
+                                            <td style="font-size:.72rem;color:var(--k3)">✓ Sama</td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
                             </tbody>
                         </table>
                     </div>
 
                     <div class="calc-result">
-                        ✓ <strong>KONVERGEN!</strong> Semua 15 titik memiliki assignment klaster yang SAMA dengan Iterasi 1.<br>
-                        Pergeseran centroid: ΔC1 = 0, ΔC2 = 0, ΔC3 = 0 &lt; ε = 0.0001<br>
-                        WCSS Iterasi 2 = 0 + 4.2600 + 2.6996 = <strong>6.9596</strong> (turun dari 14.0569)
+                        ✓ <strong>KONVERGEN!</strong> Semua <?= $total_destinasi ?> titik memiliki assignment klaster
+                        yang SAMA dengan
+                        Iterasi sebelumnya.<br>
+                        Selesai pada Iterasi ke-<?= $total_iterations ?>.<br>
+                        WCSS Final = <strong><?= number_format($calc['wcss'], 4) ?></strong>
                     </div>
 
                     <div class="formula-box">
                         <div class="formula-title">Pergeseran Centroid per Iterasi (Δ shift)</div>
                         <span class="formula-main">
                             ΔC = √[ Σⱼ (C_baru,j − C_lama,j)² ]<br><br>
-                            Iterasi 1: ΔC1 = 0 (singleton), ΔC2 = 0.7020, ΔC3 = 0.7252<br>
-                            Iterasi 2: ΔC1 = 0, ΔC2 = 0, ΔC3 = 0 ← <span style="color:var(--k3)">KONVERGEN ✓</span>
+                            Selesai dalam <?= $total_iterations ?> Iterasi.<br>
+                            WCSS Awal (Iterasi 1) =
+                            <?= number_format($calc['iterations_history'][1]['wcss'] ?? 0, 4) ?><br>
+                            WCSS Final = <?= number_format($calc['wcss'], 4) ?> ← <span
+                                style="color:var(--k3)">KONVERGEN ✓</span>
                         </span>
                     </div>
                 </div>
@@ -2423,10 +2894,13 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                     <div class="formula-box">
                         <div class="formula-title">Formula WCSS</div>
                         <span class="formula-main">WCSS = Σₖ Σᵢ∈Cₖ d²(xᵢ, centroid_k)</span>
-                        <div class="formula-vars">Jumlahkan jarak kuadrat setiap titik ke centroid klasternya masing-masing.<br>WCSS mengukur kompaktisitas klaster — semakin kecil semakin baik.</div>
+                        <div class="formula-vars">Jumlahkan jarak kuadrat setiap titik ke centroid klasternya
+                            masing-masing.<br>WCSS mengukur kompaktisitas klaster — semakin kecil semakin baik.</div>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Kontribusi WCSS Klaster 2 (8 titik) — detail per titik:</p>
+                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Kontribusi WCSS Klaster 2
+                        (<?= count($wcssK2) ?>
+                        titik) — detail per titik:</p>
                     <div class="table-wrap">
                         <table class="manual-table">
                             <thead>
@@ -2438,20 +2912,19 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php
-                                $wcssK2 = [[5, 'Ketep Pass', 0.8277, 0.6851], [6, 'Kopeng', 0.9311, 0.8669], [7, 'Kedung Kayang', 0.4481, 0.2008], [8, 'Telaga Bleder', 0.5159, 0.2662], [10, 'Sawah Sukm.', 0.5492, 0.3016], [13, 'Gunung Andong', 0.6890, 0.4747], [14, 'Umbul Songo', 0.7020, 0.4928], [15, 'Puthuk Mongkrong', 0.9858, 0.9718]];
-                                $totalK2 = array_sum(array_column($wcssK2, 3));
-                                foreach ($wcssK2 as $r): ?>
+                                <?php foreach ($wcssK2 as $r): ?>
                                     <tr>
                                         <td class="mono" style="color:var(--muted)"><?= $r[0] ?></td>
-                                        <td style="font-weight:600;font-size:.76rem"><?= $r[1] ?></td>
+                                        <td style="font-weight:600;font-size:.76rem"><?= htmlspecialchars($r[1]) ?></td>
                                         <td class="mono"><?= $r[2] ?></td>
                                         <td class="mono highlight2"><?= number_format($r[3], 4) ?></td>
                                     </tr>
                                 <?php endforeach; ?>
                                 <tr style="border-top:2px solid var(--k2)">
                                     <td colspan="3" style="font-weight:700;color:var(--k2)">WCSS K2</td>
-                                    <td class="mono highlight2" style="font-weight:700"><?= number_format($totalK2, 4) ?></td>
+                                    <td class="mono highlight2" style="font-weight:700">
+                                        <?= number_format($totalK2, 4) ?>
+                                    </td>
                                 </tr>
                             </tbody>
                         </table>
@@ -2459,20 +2932,20 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
 
                     <div class="step-detail">
                         <div class="step-detail-item">
-                            <div class="sdi-label">WCSS Klaster 1 (1 titik)</div>
-                            <div class="sdi-val gold">0.0000</div>
+                            <div class="sdi-label">WCSS Klaster 1 (<?= $calc['counts'][1] ?> titik)</div>
+                            <div class="sdi-val gold"><?= number_format($wcss_k_final[1], 4) ?></div>
                         </div>
                         <div class="step-detail-item">
-                            <div class="sdi-label">WCSS Klaster 2 (8 titik)</div>
-                            <div class="sdi-val blue">4.2600</div>
+                            <div class="sdi-label">WCSS Klaster 2 (<?= $calc['counts'][2] ?> titik)</div>
+                            <div class="sdi-val blue"><?= number_format($wcss_k_final[2], 4) ?></div>
                         </div>
                         <div class="step-detail-item">
-                            <div class="sdi-label">WCSS Klaster 3 (6 titik)</div>
-                            <div class="sdi-val green">2.6996</div>
+                            <div class="sdi-label">WCSS Klaster 3 (<?= $calc['counts'][3] ?> titik)</div>
+                            <div class="sdi-val green"><?= number_format($wcss_k_final[3], 4) ?></div>
                         </div>
                         <div class="step-detail-item">
                             <div class="sdi-label">Total WCSS Final</div>
-                            <div class="sdi-val accent">6.9596</div>
+                            <div class="sdi-val accent"><?= number_format($calc['wcss'], 4) ?></div>
                         </div>
                     </div>
                 </div>
@@ -2496,22 +2969,47 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                         </div>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Contoh perhitungan untuk <strong style="color:var(--k2)">Ketep Pass (ID=5)</strong>:</p>
+                    <?php
+                    $k2_sample_id = 0;
+                    $k2_sample_name = '-';
+                    $k2_sample_a = 0.0;
+                    $k2_sample_b = 0.0;
+                    $k2_sample_s = 0.0;
+                    $k2_sample_interp = '-';
+                    foreach ($scData as $r) {
+                        if ($r[2] == 2) {
+                            $k2_sample_id = $r[0];
+                            $k2_sample_name = $r[1];
+                            $k2_sample_a = $r[3];
+                            $k2_sample_b = $r[4];
+                            $k2_sample_s = $r[5];
+                            $k2_sample_interp = $r[6];
+                            break;
+                        }
+                    }
+                    ?>
+                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Contoh perhitungan untuk <strong
+                            style="color:var(--k2)"><?= htmlspecialchars($k2_sample_name) ?>
+                            (ID=<?= $k2_sample_id ?>)</strong>:</p>
                     <div class="formula-box">
-                        <div class="formula-title">a(5) = rata-rata jarak ke sesama anggota K2 (7 titik lain)</div>
+                        <div class="formula-title">a(<?= $k2_sample_id ?>) = rata-rata jarak ke sesama anggota K2</div>
                         <span class="formula-main">
-                            d(5,6), d(5,7), … (dihitung dari data ternormalisasi)<br>
-                            a(5) ≈ 0.8277 (rata-rata jarak intra-klaster)
+                            a(<?= $k2_sample_id ?>) ≈ <?= number_format($k2_sample_a, 4) ?> (rata-rata jarak
+                            intra-klaster)
                         </span>
                         <br><br>
-                        <div class="formula-title">b(5) = rata-rata jarak ke klaster terdekat = K3 (6 titik)</div>
+                        <div class="formula-title">b(<?= $k2_sample_id ?>) = rata-rata jarak ke klaster terdekat</div>
                         <span class="formula-main">
-                            d(5,2), d(5,3), d(5,4), d(5,9), d(5,11), d(5,12) → rata-rata<br>
-                            b(5) ≈ 0.8457 (rata-rata jarak ke K3)
+                            b(<?= $k2_sample_id ?>) ≈ <?= number_format($k2_sample_b, 4) ?>
                         </span>
                         <br><br>
-                        <div class="formula-title">s(5) = (0.8457 − 0.8277) / max(0.8457, 0.8277) = 0.0180 / 0.8457</div>
-                        <span class="formula-main">s(5) = <span style="color:var(--muted)">0.0212</span> → Salah Klaster</span>
+                        <div class="formula-title">s(<?= $k2_sample_id ?>) = (<?= number_format($k2_sample_b, 4) ?> −
+                            <?= number_format($k2_sample_a, 4) ?>) / max(<?= number_format($k2_sample_b, 4) ?>,
+                            <?= number_format($k2_sample_a, 4) ?>)
+                        </div>
+                        <span class="formula-main">s(<?= $k2_sample_id ?>) = <span
+                                style="color:var(--muted)"><?= number_format($k2_sample_s, 4) ?></span> →
+                            <?= $k2_sample_interp ?></span>
                     </div>
 
                     <div class="table-wrap">
@@ -2528,39 +3026,32 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php
-                                $scData = [
-                                    [1, 'Borobudur', 1, 0.0000, 1.5801, 1.0000, 'Sangat Baik'],
-                                    [2, 'Punthuk Setumbu', 3, 0.7752, 1.0050, 0.2287, 'Salah Klaster'],
-                                    [3, 'Candi Pawon', 3, 0.3628, 1.4036, 0.7415, 'Sangat Baik'],
-                                    [4, 'Candi Mendut', 3, 0.3448, 1.4477, 0.7618, 'Sangat Baik'],
-                                    [5, 'Ketep Pass', 2, 0.8277, 0.8457, 0.0212, 'Salah Klaster'],
-                                    [6, 'Kopeng', 2, 0.9311, 1.5146, 0.3852, 'Lemah'],
-                                    [7, 'Kedung Kayang', 2, 0.4481, 1.3010, 0.6556, 'Baik'],
-                                    [8, 'Telaga Bleder', 2, 0.5159, 1.3453, 0.6165, 'Baik'],
-                                    [9, 'Bukit Rhema', 3, 0.7758, 1.0417, 0.2553, 'Lemah'],
-                                    [10, 'Sawah Sukm.', 2, 0.5492, 1.1545, 0.5243, 'Baik'],
-                                    [11, 'Museum Karma', 3, 0.7252, 1.7333, 0.5816, 'Baik'],
-                                    [12, 'Taman Langgeng', 3, 0.8488, 1.2720, 0.3327, 'Lemah'],
-                                    [13, 'Gunung Andong', 2, 0.6890, 1.7483, 0.6059, 'Baik'],
-                                    [14, 'Umbul Songo', 2, 0.7020, 1.7417, 0.5970, 'Baik'],
-                                    [15, 'Puthuk Mongkrong', 2, 0.9858, 1.2319, 0.1998, 'Salah Klaster'],
-                                ];
-                                foreach ($scData as $r): ?>
+                                <?php foreach ($scData as $r): ?>
                                     <tr>
                                         <td class="mono" style="color:var(--muted)"><?= $r[0] ?></td>
-                                        <td style="font-weight:600;font-size:.76rem"><?= $r[1] ?></td>
+                                        <td style="font-weight:600;font-size:.76rem"><?= htmlspecialchars($r[1]) ?></td>
                                         <td><span class="assign-badge ab<?= $r[2] ?>">K<?= $r[2] ?></span></td>
-                                        <td class="mono"><?= $r[3] ?></td>
-                                        <td class="mono"><?= $r[4] ?></td>
-                                        <td class="mono" style="color:<?= $r[5] >= 0.7 ? 'var(--k3)' : ($r[5] >= 0.5 ? 'var(--k2)' : 'var(--muted)') ?>;font-weight:700"><?= $r[5] ?></td>
-                                        <td style="font-size:.72rem;color:<?= $r[6] == 'Sangat Baik' ? 'var(--k3)' : ($r[6] == 'Baik' ? 'var(--k2)' : 'var(--muted)') ?>"><?= $r[6] ?></td>
+                                        <td class="mono"><?= number_format($r[3], 4) ?></td>
+                                        <td class="mono"><?= number_format($r[4], 4) ?></td>
+                                        <td class="mono"
+                                            style="color:<?= $r[5] >= 0.7 ? 'var(--k3)' : ($r[5] >= 0.5 ? 'var(--k2)' : 'var(--muted)') ?>;font-weight:700">
+                                            <?= $r[5] ?>
+                                        </td>
+                                        <td
+                                            style="font-size:.72rem;color:<?= $r[6] == 'Sangat Baik' ? 'var(--k3)' : ($r[6] == 'Baik' ? 'var(--k2)' : 'var(--muted)') ?>">
+                                            <?= $r[6] ?>
+                                        </td>
                                     </tr>
                                 <?php endforeach; ?>
                                 <tr style="border-top:2px solid var(--k3);background:rgba(16,185,129,.07)">
-                                    <td colspan="5" style="font-weight:700;color:var(--k3)">SC Keseluruhan = rata-rata s(i)</td>
-                                    <td class="mono highlight3" style="font-weight:700">0.5005</td>
-                                    <td style="font-size:.72rem;color:var(--k3)">✓ Baik (> 0.5)</td>
+                                    <td colspan="5" style="font-weight:700;color:var(--k3)">SC Keseluruhan = rata-rata
+                                        s(i)</td>
+                                    <td class="mono highlight3" style="font-weight:700">
+                                        <?= number_format($evaluasi['sc'], 4) ?>
+                                    </td>
+                                    <td style="font-size:.72rem;color:var(--k3)">
+                                        <?= $evaluasi['sc'] >= 0.7 ? '✓ Sangat Baik' : ($evaluasi['sc'] >= 0.5 ? '✓ Baik (> 0.5)' : ($evaluasi['sc'] >= 0.25 ? '⚠ Lemah' : '✗ Buruk')) ?>
+                                    </td>
                                 </tr>
                             </tbody>
                         </table>
@@ -2586,27 +3077,34 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                         </div>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Langkah 1 — Hitung σᵢ (dispersi rata-rata intra-klaster):</p>
+                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Langkah 1 — Hitung σᵢ (dispersi
+                        rata-rata intra-klaster):</p>
                     <div class="formula-box">
                         <span class="formula-main">
-                            σ₁ = d(Borobudur, C1) / 1 = 0.0000 / 1 = <span style="color:var(--k1)">0.0000</span><br>
-                            σ₂ = Σ d(xᵢ,C2) / 8 = (0.8277+0.9311+0.4481+0.5159+0.5492+0.6890+0.7020+0.9858)/8<br>
-                            = 5.6488 / 8 = <span style="color:var(--k2)">0.7061</span><br>
-                            σ₃ = Σ d(xᵢ,C3) / 6 = (0.7752+0.3628+0.3448+0.7758+0.7252+0.8488)/6<br>
-                            = 3.8326 / 6 = <span style="color:var(--k3)">0.6388</span>
+                            σ₁ = <span style="color:var(--k1)"><?= number_format($calc['S_k'][1] ?? 0.0, 4) ?></span>
+                            (<?= $calc['counts'][1] ?? 0 ?> titik)<br>
+                            σ₂ = <span style="color:var(--k2)"><?= number_format($calc['S_k'][2] ?? 0.0, 4) ?></span>
+                            (<?= $calc['counts'][2] ?? 0 ?> titik)<br>
+                            σ₃ = <span style="color:var(--k3)"><?= number_format($calc['S_k'][3] ?? 0.0, 4) ?></span>
+                            (<?= $calc['counts'][3] ?? 0 ?> titik)
                         </span>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0 .5rem">Langkah 2 — Hitung jarak antar centroid d(Cᵢ, Cⱼ):</p>
+                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0 .5rem">Langkah 2 — Hitung jarak antar
+                        centroid d(Cᵢ, Cⱼ):</p>
                     <div class="formula-box">
                         <span class="formula-main">
-                            d(C1, C2) = √Σ(C1ⱼ−C2ⱼ)² = √D²(C1,C2) = √5.0694 = <span style="color:var(--text)">2.2515</span><br>
-                            d(C1, C3) = √D²(C1,C3) = √2.4977 = <span style="color:var(--text)">1.5801</span><br>
-                            d(C2, C3) = √Σ(C2ⱼ−C3ⱼ)² = <span style="color:var(--text)">1.1828</span>
+                            d(C1, C2) = <span
+                                style="color:var(--text)"><?= number_format($calc['centroid_dists'][1][2] ?? 0.0, 4) ?></span><br>
+                            d(C1, C3) = <span
+                                style="color:var(--text)"><?= number_format($calc['centroid_dists'][1][3] ?? 0.0, 4) ?></span><br>
+                            d(C2, C3) = <span
+                                style="color:var(--text)"><?= number_format($calc['centroid_dists'][2][3] ?? 0.0, 4) ?></span>
                         </span>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0 .5rem">Langkah 3 — Hitung Rᵢⱼ = (σᵢ + σⱼ) / d(Cᵢ,Cⱼ) dan ambil max:</p>
+                    <p style="font-size:.82rem;color:var(--muted);margin:.75rem 0 .5rem">Langkah 3 — Hitung Rᵢⱼ = (σᵢ +
+                        σⱼ) / d(Cᵢ,Cⱼ) dan ambil max:</p>
                     <div class="table-wrap">
                         <table class="manual-table">
                             <thead>
@@ -2621,42 +3119,35 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                                 </tr>
                             </thead>
                             <tbody>
-                                <tr>
-                                    <td class="highlight">K1</td>
-                                    <td class="mono">0.0000</td>
-                                    <td>vs K2</td>
-                                    <td class="mono">0.7061</td>
-                                    <td class="mono">2.2517</td>
-                                    <td class="mono">0.3136</td>
-                                    <td class="mono highlight">0.4043</td>
-                                </tr>
-                                <tr>
-                                    <td class="highlight2">K2</td>
-                                    <td class="mono">0.7061</td>
-                                    <td>vs K3</td>
-                                    <td class="mono">0.6388</td>
-                                    <td class="mono">1.1828</td>
-                                    <td class="mono">1.1370</td>
-                                    <td class="mono highlight2">1.1370</td>
-                                </tr>
-                                <tr>
-                                    <td class="highlight3">K3</td>
-                                    <td class="mono">0.6388</td>
-                                    <td>vs K1</td>
-                                    <td class="mono">0.0000</td>
-                                    <td class="mono">1.5801</td>
-                                    <td class="mono">0.4043</td>
-                                    <td class="mono highlight3">1.1370</td>
-                                </tr>
+                                <?php foreach ($dbi_table as $row): ?>
+                                    <tr>
+                                        <td class="highlight<?= $row['i'] == 1 ? '' : $row['i'] ?>">K<?= $row['i'] ?></td>
+                                        <td class="mono"><?= number_format($row['sigma_i'], 4) ?></td>
+                                        <td>vs K<?= $row['j'] ?></td>
+                                        <td class="mono"><?= number_format($row['sigma_j'], 4) ?></td>
+                                        <td class="mono"><?= number_format($row['d_ij'], 4) ?></td>
+                                        <td class="mono">
+                                            <?= number_format(($row['sigma_i'] + $row['sigma_j']) / $row['d_ij'], 4) ?>
+                                        </td>
+                                        <td class="mono highlight<?= $row['i'] == 1 ? '' : $row['i'] ?>">
+                                            <?= number_format($row['ratio'], 4) ?>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
                             </tbody>
                         </table>
                     </div>
 
                     <div class="formula-box">
-                        <div class="formula-title">DBI = (1/K) × (R1 + R2 + R3) = (1/3) × (0.4043 + 1.1370 + 1.1370)</div>
-                        <span class="formula-main">DBI = (1/3) × 2.6783 = <span style="color:var(--k3)">0.8928</span></span>
+                        <div class="formula-title">DBI = (1/K) × (R1 + R2 + R3)</div>
+                        <span class="formula-main">DBI = (1/3) ×
+                            <?= number_format(($dbi_table[1]['ratio'] ?? 0) + ($dbi_table[2]['ratio'] ?? 0) + ($dbi_table[3]['ratio'] ?? 0), 4) ?>
+                            = <span style="color:var(--k3)"><?= number_format($evaluasi['dbi'], 4) ?></span></span>
                     </div>
-                    <div class="calc-result">✓ <strong>DBI = 0.8928</strong> — Baik (&lt; 1.0). Artinya klaster cukup kompak secara internal dan terpisah antar klaster.</div>
+                    <div class="calc-result">✓ <strong>DBI = <?= number_format($evaluasi['dbi'], 4) ?></strong> —
+                        <?= $evaluasi['dbi'] < 1.0 ? 'Baik (< 1.0)' : 'Dapat diterima' ?>. Artinya klaster cukup kompak
+                        secara internal dan terpisah antar klaster.
+                    </div>
                 </div>
             </div>
 
@@ -2674,17 +3165,17 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                         <div class="formula-vars">
                             BCSS = Between-Cluster Sum of Squares (variansi antar klaster)<br>
                             WCSS = Within-Cluster Sum of Squares (variansi dalam klaster)<br>
-                            N = 15 (total titik), K = 3 (klaster). Semakin BESAR semakin baik.
+                            N = <?= $total_destinasi ?> (total titik), K = 3 (klaster). Semakin BESAR semakin baik.
                         </div>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Langkah 1 — Hitung Grand Mean (rata-rata semua data):</p>
+                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Langkah 1 — Hitung Grand Mean
+                        (rata-rata semua data):</p>
                     <div class="formula-box">
                         <span class="formula-main">
-                            Grand Mean Visit_n = Σ Visit_n / 15<br>
-                            = (1.0000+0.1285+0.0548+0.0794+0.1489+0.0573+0.0115+0.0057<br>
-                            +0.1121+0.0000+0.0483+0.0957+0.0221+0.0033+0.0139) / 15<br>
-                            = 1.7815 / 15 = <span style="color:var(--text)">0.1188</span>
+                            Grand Mean Visit_n = Σ Visit_n / <?= $total_destinasi ?><br>
+                            = <span
+                                style="color:var(--text)"><?= number_format($calc['global_mean']['kunjungan'] ?? 0.0, 4) ?></span>
                         </span>
                     </div>
 
@@ -2692,23 +3183,31 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                     <div class="formula-box">
                         <div class="formula-title">BCSS = Σₖ nₖ × d²(Centroid_k, Grand_Mean)</div>
                         <span class="formula-main">
-                            BCSS = 1×d²(C1,GM) + 8×d²(C2,GM) + 6×d²(C3,GM)<br>
-                            = 1×(jarak C1 ke Grand Mean)² + 8×(jarak C2 ke GM)² + 6×(jarak C3 ke GM)²<br>
-                            = 1×6.7840 + 8×0.1416 + 6×0.2140<br>
-                            ≈ 6.7840 + 1.1328 + 1.2840 = <span style="color:var(--text)">8.1797 (BCSS)</span>
+                            BCSS = <?= $calc['counts'][1] ?? 0 ?>×d²(C1,GM) + <?= $calc['counts'][2] ?? 0 ?>×d²(C2,GM) +
+                            <?= $calc['counts'][3] ?? 0 ?>×d²(C3,GM)<br>
+                            = <?= $calc['counts'][1] ?? 0 ?>×(<?= number_format($d2_c_gm[1] ?? 0.0, 4) ?>) +
+                            <?= $calc['counts'][2] ?? 0 ?>×(<?= number_format($d2_c_gm[2] ?? 0.0, 4) ?>) +
+                            <?= $calc['counts'][3] ?? 0 ?>×(<?= number_format($d2_c_gm[3] ?? 0.0, 4) ?>)<br>
+                            ≈ <span style="color:var(--text)"><?= number_format($calc['bcss'] ?? 0.0, 4) ?>
+                                (BCSS)</span>
                         </span>
                     </div>
 
                     <div class="formula-box">
                         <div class="formula-title">CHI = [BCSS/(K−1)] / [WCSS/(N−K)]</div>
                         <span class="formula-main">
-                            = [8.1797 / (3−1)] / [6.9596 / (15−3)]<br>
-                            = [8.1797 / 2] / [6.9596 / 12]<br>
-                            = 4.0899 / 0.5800<br>
-                            = <span style="color:var(--k1)">7.052</span>
+                            = [<?= number_format($calc['bcss'] ?? 0.0, 4) ?> / (3−1)] /
+                            [<?= number_format($calc['wcss'] ?? 0.0, 4) ?> / (<?= $total_destinasi ?>−3)]<br>
+                            = [<?= number_format($calc['bcss'] ?? 0.0, 4) ?> / 2] /
+                            [<?= number_format($calc['wcss'] ?? 0.0, 4) ?> / <?= ($total_destinasi - 3) ?>]<br>
+                            = <?= number_format(($calc['bcss'] ?? 0.0) / 2, 4) ?> /
+                            <?= number_format(($calc['wcss'] ?? 0.0) / ($total_destinasi - 3), 4) ?><br>
+                            = <span style="color:var(--k1)"><?= number_format($calc['chi'] ?? 0.0, 3) ?></span>
                         </span>
                     </div>
-                    <div class="calc-note"><strong>⚠ CHI = 7.052 di bawah threshold ideal (> 100).</strong> Ini wajar karena dataset hanya N=15 titik. CHI sangat sensitif terhadap ukuran dataset — dataset kecil menghasilkan CHI rendah meski klasterisasi berkualitas baik (terbukti dari SC dan DBI yang bagus).</div>
+                    <div class="calc-note"><strong>⚠ CHI = <?= number_format($calc['chi'] ?? 0.0, 3) ?></strong>. CHI
+                        sangat sensitif terhadap ukuran dataset — dataset kecil menghasilkan CHI rendah meski
+                        klasterisasi berkualitas baik (terbukti dari SC dan DBI yang bagus).</div>
                 </div>
             </div>
 
@@ -2721,22 +3220,53 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                 </div>
                 <div class="calc-body">
                     <div class="formula-box">
-                        <div class="formula-title">Formula Skor Potensi (Weighted Average dari 4 atribut utama)</div>
-                        <span class="formula-main">Skor = (0.4×Rating_n) + (0.3×Visit_n) + (0.2×Pend_n) + (0.1×((Alam_n+Bud_n)/2))</span>
+                        <div class="formula-title">Formula Skor Potensi (Weighted Sum dari 6 atribut mentah, bukan data
+                            ternormalisasi)</div>
+                        <span class="formula-main">Skor = (Rating/5×0.25) + (Akses/5×0.15) + (Fasilitas/5×0.10) +
+                            (P.Alam/5×0.20) + (P.Budaya/5×0.15) + (MIN(Pendapatan,20000)/20000×0.15)</span>
                         <div class="formula-vars">
-                            Bobot: Rating 40% (persepsi kualitas), Kunjungan 30% (demand aktual),<br>
-                            Pendapatan 20% (kontribusi ekonomi), Potensi Alam+Budaya 10% (daya tarik)
+                            Bobot: Rating 25% (persepsi kualitas), Aksesibilitas 15%, Fasilitas 10%,<br>
+                            Potensi Alam 20%, Potensi Budaya 15%, Pendapatan 15% (dibatasi maks Rp 20.000 Jt agar
+                            destinasi pendapatan tinggi tidak mendominasi skor)
                         </div>
                     </div>
 
-                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Contoh — <strong style="color:var(--k1)">Candi Borobudur (ID=1)</strong>:</p>
+                    <?php
+                    $first_skor = reset($skor_calc);
+                    if ($first_skor) {
+                        $s_id = $first_skor[0];
+                        $s_nama = $first_skor[1];
+                        $s_k = $first_skor[2];
+                        $s_rating_part = $first_skor[3];
+                        $s_akses_part = $first_skor[4];
+                        $s_fasilitas_part = $first_skor[5];
+                        $s_alam_part = $first_skor[6];
+                        $s_budaya_part = $first_skor[7];
+                        $s_pend_part = $first_skor[8];
+                        $s_total = $first_skor[9];
+                    } else {
+                        $s_id = 1;
+                        $s_nama = 'Candi Borobudur';
+                        $s_k = 1;
+                        $s_rating_part = 0.2450;
+                        $s_akses_part = 0.1500;
+                        $s_fasilitas_part = 0.1000;
+                        $s_alam_part = 0.1600;
+                        $s_budaya_part = 0.1500;
+                        $s_pend_part = 0.1388;
+                        $s_total = 0.9438;
+                    }
+                    ?>
+                    <p style="font-size:.82rem;color:var(--muted);margin-bottom:.75rem">Contoh — <strong
+                            style="color:var(--k1)"><?= htmlspecialchars($s_nama) ?> (ID=<?= $s_id ?>)</strong>:</p>
                     <div class="formula-box">
                         <span class="formula-main">
-                            Rating_n = 1.0000, Visit_n = 1.0000, Pend_n = 1.0000, Alam_n = 0.6667, Bud_n = 1.0000<br><br>
-                            Skor = (0.4 × 1.0000) + (0.3 × 1.0000) + (0.2 × 1.0000) + (0.1 × (0.6667+1.0000)/2)<br>
-                            = 0.4000 + 0.3000 + 0.2000 + (0.1 × 0.8334)<br>
-                            = 0.4000 + 0.3000 + 0.2000 + 0.0834<br>
-                            = <span style="color:var(--k1)">0.9834</span> ≈ 0.9438 (dibulatkan dari sheet)
+                            Skor = (Rating/5×0.25) + (Akses/5×0.15) + (Fasilitas/5×0.10) + (Alam/5×0.20) +
+                            (Budaya/5×0.15) + (Pend/20000×0.15)<br>
+                            = <?= number_format($s_rating_part, 4) ?> + <?= number_format($s_akses_part, 4) ?> +
+                            <?= number_format($s_fasilitas_part, 4) ?> + <?= number_format($s_alam_part, 4) ?> +
+                            <?= number_format($s_budaya_part, 4) ?> + <?= number_format($s_pend_part, 4) ?><br>
+                            = <span style="color:var(--k1)"><?= number_format($s_total, 4) ?></span>
                         </span>
                     </div>
 
@@ -2747,42 +3277,31 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                                     <th>ID</th>
                                     <th>Nama</th>
                                     <th>Klaster</th>
-                                    <th>Rating_n ×0.4</th>
-                                    <th>Visit_n ×0.3</th>
-                                    <th>Pend_n ×0.2</th>
-                                    <th>AtraksiNat ×0.1</th>
+                                    <th>Rating ×0.25</th>
+                                    <th>Akses ×0.15</th>
+                                    <th>Fasilitas ×0.10</th>
+                                    <th>Alam ×0.20</th>
+                                    <th>Budaya ×0.15</th>
+                                    <th>Pend ×0.15</th>
                                     <th>Skor Potensi</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php
-                                $skor_calc = [
-                                    [1, 'Borobudur', 1, 0.4000, 0.3000, 0.2000, 0.0834, 0.9438],
-                                    [2, 'Punthuk Setumbu', 3, 0.3333, 0.0386, 0.0283, 0.0833, 0.7260],
-                                    [3, 'Candi Pawon', 3, 0.1667, 0.0164, 0.0070, 0.0667, 0.6664],
-                                    [4, 'Candi Mendut', 3, 0.2000, 0.0238, 0.0108, 0.0667, 0.6940],
-                                    [5, 'Ketep Pass', 2, 0.2667, 0.0447, 0.0316, 0.0667, 0.7082],
-                                    [6, 'Kopeng', 2, 0.0333, 0.0172, 0.0062, 0.0333, 0.5659],
-                                    [7, 'Kedung Kayang', 2, 0.2333, 0.0034, 0.0012, 0.0500, 0.5824],
-                                    [8, 'Telaga Bleder', 2, 0.0667, 0.0017, 0.0008, 0.0333, 0.5171],
-                                    [9, 'Bukit Rhema', 3, 0.3000, 0.0336, 0.0207, 0.0667, 0.6758],
-                                    [10, 'Sawah Sukm.', 2, 0.1333, 0.0000, 0.0000, 0.0667, 0.5966],
-                                    [11, 'Museum Karma', 3, 0.1000, 0.0145, 0.0048, 0.0500, 0.6649],
-                                    [12, 'Taman Langgeng', 3, 0.0000, 0.0287, 0.0179, 0.0333, 0.6089],
-                                    [13, 'Gunung Andong', 2, 0.2667, 0.0066, 0.0023, 0.0500, 0.5882],
-                                    [14, 'Umbul Songo', 2, 0.1667, 0.0010, 0.0004, 0.0500, 0.5718],
-                                    [15, 'Puthuk Mongkrong', 2, 0.2000, 0.0042, 0.0019, 0.0833, 0.6379],
-                                ];
-                                foreach ($skor_calc as $r): ?>
+                                <?php foreach ($skor_calc as $r): ?>
                                     <tr>
                                         <td class="mono" style="color:var(--muted)"><?= $r[0] ?></td>
-                                        <td style="font-weight:600;font-size:.76rem"><?= $r[1] ?></td>
+                                        <td style="font-weight:600;font-size:.76rem"><?= htmlspecialchars($r[1]) ?></td>
                                         <td><span class="assign-badge ab<?= $r[2] ?>">K<?= $r[2] ?></span></td>
                                         <td class="mono"><?= number_format($r[3], 4) ?></td>
                                         <td class="mono"><?= number_format($r[4], 4) ?></td>
                                         <td class="mono"><?= number_format($r[5], 4) ?></td>
                                         <td class="mono"><?= number_format($r[6], 4) ?></td>
-                                        <td class="mono" style="color:<?= $r[7] >= 0.9 ? 'var(--k1)' : ($r[7] >= 0.7 ? 'var(--k3)' : ($r[7] >= 0.6 ? 'var(--k2)' : 'var(--muted)')) ?>;font-weight:700"><?= number_format($r[7], 4) ?></td>
+                                        <td class="mono"><?= number_format($r[7], 4) ?></td>
+                                        <td class="mono"><?= number_format($r[8], 4) ?></td>
+                                        <td class="mono"
+                                            style="color:<?= $r[9] >= 0.9 ? 'var(--k1)' : ($r[9] >= 0.7 ? 'var(--k3)' : ($r[9] >= 0.6 ? 'var(--k2)' : 'var(--muted)')) ?>;font-weight:700">
+                                            <?= number_format($r[9], 4) ?>
+                                        </td>
                                     </tr>
                                 <?php endforeach; ?>
                             </tbody>
@@ -2795,9 +3314,11 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
 
         <footer>
             <strong>SIG K-Means++ Wisata Kabupaten Magelang</strong> &nbsp;|&nbsp;
-            Pengembangan Model Konseptual Intelijen Spasial Berbasis Klasterisasi K-Means++ &amp; Analisis Spatio-Temporal &nbsp;|&nbsp;
+            Pengembangan Model Konseptual Intelijen Spasial Berbasis Klasterisasi K-Means++ &amp; Analisis
+            Spatio-Temporal &nbsp;|&nbsp;
             Data: <?= $total_destinasi ?> Destinasi · 10 Atribut · <?= $total_klaster ?> Klaster Optimal &nbsp;|&nbsp;
-            SC=<?= number_format($evaluasi['sc'], 4) ?> · DBI=<?= number_format($evaluasi['dbi'], 4) ?> · Konvergen Iterasi <?= $evaluasi['iter'] ?>
+            SC=<?= number_format($evaluasi['sc'], 4) ?> · DBI=<?= number_format($evaluasi['dbi'], 4) ?> · Konvergen
+            Iterasi <?= $evaluasi['iter'] ?>
         </footer>
 
         <!-- ══════════ SCRIPTS ══════════ -->
@@ -2862,14 +3383,14 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
             // ─── BUTTON HOVER EFFECTS ─────────────────────────
             const btnUpdate = document.getElementById('btnUpdateCalc');
             if (btnUpdate) {
-                btnUpdate.addEventListener('mouseenter', function() {
+                btnUpdate.addEventListener('mouseenter', function () {
                     if (!this.disabled) {
                         this.style.background = '#059669';
                         this.style.transform = 'translateY(-2px)';
                         this.style.boxShadow = '0 8px 20px rgba(16,185,129,0.4)';
                     }
                 });
-                btnUpdate.addEventListener('mouseleave', function() {
+                btnUpdate.addEventListener('mouseleave', function () {
                     if (!this.disabled) {
                         this.style.background = '#10b981';
                         this.style.transform = 'translateY(0)';
@@ -2940,12 +3461,12 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                     console.log('Sending payload:', payload);
 
                     fetch('save_calculation.php', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                            },
-                            body: JSON.stringify(payload)
-                        })
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(payload)
+                    })
                         .then(response => response.json())
                         .then(data => {
                             if (data.success) {
@@ -3066,29 +3587,29 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                 data: {
                     labels: ['Rating', 'Aksesibilitas', 'Fasilitas', 'P.Alam', 'P.Budaya'],
                     datasets: [{
-                            label: 'K1 Tinggi',
-                            data: radarData[1] || [0, 0, 0, 0, 0],
-                            backgroundColor: 'rgba(245,158,11,.15)',
-                            borderColor: '#f59e0b',
-                            pointBackgroundColor: '#f59e0b',
-                            borderWidth: 2
-                        },
-                        {
-                            label: 'K2 Sedang',
-                            data: radarData[2] || [0, 0, 0, 0, 0],
-                            backgroundColor: 'rgba(59,130,246,.15)',
-                            borderColor: '#3b82f6',
-                            pointBackgroundColor: '#3b82f6',
-                            borderWidth: 2
-                        },
-                        {
-                            label: 'K3 Rendah',
-                            data: radarData[3] || [0, 0, 0, 0, 0],
-                            backgroundColor: 'rgba(16,185,129,.15)',
-                            borderColor: '#10b981',
-                            pointBackgroundColor: '#10b981',
-                            borderWidth: 2
-                        },
+                        label: 'K1 Tinggi',
+                        data: radarData[1] || [0, 0, 0, 0, 0],
+                        backgroundColor: 'rgba(245,158,11,.15)',
+                        borderColor: '#f59e0b',
+                        pointBackgroundColor: '#f59e0b',
+                        borderWidth: 2
+                    },
+                    {
+                        label: 'K2 Sedang',
+                        data: radarData[2] || [0, 0, 0, 0, 0],
+                        backgroundColor: 'rgba(59,130,246,.15)',
+                        borderColor: '#3b82f6',
+                        pointBackgroundColor: '#3b82f6',
+                        borderWidth: 2
+                    },
+                    {
+                        label: 'K3 Rendah',
+                        data: radarData[3] || [0, 0, 0, 0, 0],
+                        backgroundColor: 'rgba(16,185,129,.15)',
+                        borderColor: '#10b981',
+                        pointBackgroundColor: '#10b981',
+                        borderWidth: 2
+                    },
                     ]
                 },
                 options: {
@@ -3163,71 +3684,13 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
             });
 
             // ─── CHART: Silhouette ────────────────────────────
-            const siData = [{
-                    n: 'Borobudur',
-                    k: 1,
-                    s: 1.0000
-                }, {
-                    n: 'Pnthk Setumbu',
-                    k: 3,
-                    s: 0.2287
-                }, {
-                    n: 'Candi Pawon',
-                    k: 3,
-                    s: 0.7415
-                }, {
-                    n: 'Candi Mendut',
-                    k: 3,
-                    s: 0.7618
-                },
-                {
-                    n: 'Ketep Pass',
-                    k: 2,
-                    s: 0.0212
-                }, {
-                    n: 'Kopeng',
-                    k: 2,
-                    s: 0.3852
-                }, {
-                    n: 'Kedung Kayang',
-                    k: 2,
-                    s: 0.6556
-                }, {
-                    n: 'Telaga Bleder',
-                    k: 2,
-                    s: 0.6165
-                },
-                {
-                    n: 'Bukit Rhema',
-                    k: 3,
-                    s: 0.2553
-                }, {
-                    n: 'Saw.Sukomakmur',
-                    k: 2,
-                    s: 0.5243
-                }, {
-                    n: 'Museum Karma',
-                    k: 3,
-                    s: 0.5816
-                }, {
-                    n: 'Taman Langgeng',
-                    k: 3,
-                    s: 0.3327
-                },
-                {
-                    n: 'Gn.Andong',
-                    k: 2,
-                    s: 0.6059
-                }, {
-                    n: 'Umbul Songo',
-                    k: 2,
-                    s: 0.5970
-                }, {
-                    n: 'Pthk Mongkrong',
-                    k: 2,
-                    s: 0.1998
-                }
-            ];
+            const siData = <?= json_encode(array_map(function ($r) {
+                return [
+                    'n' => strlen($r[1]) > 14 ? substr($r[1], 0, 12) . '…' : $r[1],
+                    'k' => $r[2],
+                    's' => $r[5]
+                ];
+            }, $scData)) ?>;
             new Chart(document.getElementById('chartSilhouette'), {
                 type: 'bar',
                 data: {
@@ -3247,8 +3710,6 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                     },
                     scales: {
                         y: {
-                            min: 0.3,
-                            max: 0.9,
                             grid: {
                                 color: '#1e2d45'
                             }
@@ -3269,10 +3730,15 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
 
             // ─── CHART: WCSS convergence ──────────────────────
             const wcssPerIter = <?= json_encode($wcss_per_iter) ?>;
+            const wcssLabels = wcssPerIter.map((_, index) => {
+                if (index === 0) return 'Iterasi 0 (init)';
+                if (index === wcssPerIter.length - 1) return `Iterasi ${index} (konvergen)`;
+                return `Iterasi ${index}`;
+            });
             new Chart(document.getElementById('chartWCSS'), {
                 type: 'line',
                 data: {
-                    labels: ['Iterasi 0 (init)', 'Iterasi 1', 'Iterasi 2 (konvergen)'],
+                    labels: wcssLabels,
                     datasets: [{
                         label: 'WCSS',
                         data: wcssPerIter,
@@ -3312,29 +3778,29 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                 data: {
                     labels: ['Rating', 'Akses', 'Fasilitas', 'P.Alam', 'P.Budaya', 'Trend YoY (%)'],
                     datasets: [{
-                            label: 'K1 Tinggi',
-                            data: radarData[1] || [0, 0, 0, 0, 0, 0],
-                            backgroundColor: 'rgba(245,158,11,.15)',
-                            borderColor: '#f59e0b',
-                            pointBackgroundColor: '#f59e0b',
-                            borderWidth: 2
-                        },
-                        {
-                            label: 'K2 Sedang',
-                            data: radarData[2] || [0, 0, 0, 0, 0, 0],
-                            backgroundColor: 'rgba(59,130,246,.15)',
-                            borderColor: '#3b82f6',
-                            pointBackgroundColor: '#3b82f6',
-                            borderWidth: 2
-                        },
-                        {
-                            label: 'K3 Rendah',
-                            data: radarData[3] || [0, 0, 0, 0, 0, 0],
-                            backgroundColor: 'rgba(16,185,129,.15)',
-                            borderColor: '#10b981',
-                            pointBackgroundColor: '#10b981',
-                            borderWidth: 2
-                        },
+                        label: 'K1 Tinggi',
+                        data: radarData[1] || [0, 0, 0, 0, 0, 0],
+                        backgroundColor: 'rgba(245,158,11,.15)',
+                        borderColor: '#f59e0b',
+                        pointBackgroundColor: '#f59e0b',
+                        borderWidth: 2
+                    },
+                    {
+                        label: 'K2 Sedang',
+                        data: radarData[2] || [0, 0, 0, 0, 0, 0],
+                        backgroundColor: 'rgba(59,130,246,.15)',
+                        borderColor: '#3b82f6',
+                        pointBackgroundColor: '#3b82f6',
+                        borderWidth: 2
+                    },
+                    {
+                        label: 'K3 Rendah',
+                        data: radarData[3] || [0, 0, 0, 0, 0, 0],
+                        backgroundColor: 'rgba(16,185,129,.15)',
+                        borderColor: '#10b981',
+                        pointBackgroundColor: '#10b981',
+                        borderWidth: 2
+                    },
                     ]
                 },
                 options: {
@@ -3506,33 +3972,33 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                 data: {
                     labels: topProj.map(d => d.nama.length > 14 ? d.nama.slice(0, 12) + '…' : d.nama),
                     datasets: [{
-                            label: '2024',
-                            data: topProj.map(d => d.y2024),
-                            backgroundColor: 'rgba(100,116,139,.5)',
-                            borderRadius: 4,
-                            borderSkipped: false
-                        },
-                        {
-                            label: '2025',
-                            data: topProj.map(d => d.y2025),
-                            backgroundColor: 'rgba(99,102,241,.6)',
-                            borderRadius: 4,
-                            borderSkipped: false
-                        },
-                        {
-                            label: '2026',
-                            data: topProj.map(d => d.y2026),
-                            backgroundColor: 'rgba(59,130,246,.7)',
-                            borderRadius: 4,
-                            borderSkipped: false
-                        },
-                        {
-                            label: '2027',
-                            data: topProj.map(d => d.y2027),
-                            backgroundColor: 'rgba(16,185,129,.8)',
-                            borderRadius: 4,
-                            borderSkipped: false
-                        },
+                        label: '2024',
+                        data: topProj.map(d => d.y2024),
+                        backgroundColor: 'rgba(100,116,139,.5)',
+                        borderRadius: 4,
+                        borderSkipped: false
+                    },
+                    {
+                        label: '2025',
+                        data: topProj.map(d => d.y2025),
+                        backgroundColor: 'rgba(99,102,241,.6)',
+                        borderRadius: 4,
+                        borderSkipped: false
+                    },
+                    {
+                        label: '2026',
+                        data: topProj.map(d => d.y2026),
+                        backgroundColor: 'rgba(59,130,246,.7)',
+                        borderRadius: 4,
+                        borderSkipped: false
+                    },
+                    {
+                        label: '2027',
+                        data: topProj.map(d => d.y2027),
+                        backgroundColor: 'rgba(16,185,129,.8)',
+                        borderRadius: 4,
+                        borderSkipped: false
+                    },
                     ]
                 },
                 options: {
@@ -3603,7 +4069,7 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
                     const icon = L.divIcon({
                         className: '',
                         html: `<div style="
-        width:${r*2}px;height:${r*2}px;
+        width:${r * 2}px;height:${r * 2}px;
         background:${c};
         border:3px solid #0a0f1e;
         border-radius:50%;
@@ -3625,7 +4091,7 @@ $wcss_per_iter = [null, 14.057, $evaluasi['wcss']];
           <tr><td style="color:#888">Kunjungan/Thn</td><td style="font-weight:600;text-align:right">${Number(d.kunjungan).toLocaleString()}</td></tr>
           <tr><td style="color:#888">Rating</td><td style="font-weight:600;text-align:right">⭐ ${Number(d.rating).toFixed(1)}</td></tr>
           <tr><td style="color:#888">Pendapatan</td><td style="font-weight:600;text-align:right">Rp ${Number(d.pendapatan).toLocaleString()} Jt</td></tr>
-          <tr><td style="color:#888">Trend YoY</td><td style="font-weight:600;text-align:right;color:${Number(d.trend)>=0.3?'#10b981':Number(d.trend)>=0.15?'#3b82f6':'#888'}">+${(Number(d.trend)*100).toFixed(1)}%</td></tr>
+          <tr><td style="color:#888">Trend YoY</td><td style="font-weight:600;text-align:right;color:${Number(d.trend) >= 0.3 ? '#10b981' : Number(d.trend) >= 0.15 ? '#3b82f6' : '#888'}">+${(Number(d.trend) * 100).toFixed(1)}%</td></tr>
           <tr><td style="color:#888">Skor Potensi</td><td style="font-weight:600;text-align:right">${Number(d.skor).toFixed(4)}</td></tr>
           <tr><td style="color:#888">Zona</td><td style="text-align:right">${d.zona}</td></tr>
         </table>
